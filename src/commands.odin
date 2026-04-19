@@ -272,8 +272,13 @@ process_command :: proc(client: ^Client, cmd_line: string) {
 		} else {
 			ws_send_text(client, "color: invalid color code. Use 31 to 36.\r\n")
 		}
+	} else if cmd == "matrix" {
+		broadcast_message(fmt.tprintf("\r\n\x1b[32m[System] \x1b[%sm%s\x1b[0m \x1b[32minitiated the Matrix sequence...\x1b[0m\r\n___MATRIX_START___", client.color, client.name), -1)
+	} else if cmd == "clearall" {
+		// \x1b[2J clears the screen, \x1b[3J clears scrollback, \x1b[H moves cursor to home
+		broadcast_message("\x1b[2J\x1b[3J\x1b[H", -1)
 	} else if cmd == "help" {
-		ws_send_text(client, "Commands: ls, cd, pwd, mkdir, rmdir, rm, echo, cat, wall, whoami, login, color, help\r\n")
+		ws_send_text(client, "Commands: ls, cd, pwd, mkdir, rmdir, rm, echo, cat, wall, whoami, login, color, matrix, clearall, help\r\n")
 	} else {
 		ws_send_text(client, fmt.tprintf("webos: %s: command not found\r\n", cmd))
 	}

@@ -22,7 +22,8 @@ All connected users share the same in-memory Virtual File System and can interac
 - [x] Complete directory system (`mkdir`, `cd`, `pwd`, `rmdir`) and memory management (Extended VFS).
 - [x] Advanced **TAB Autocomplete** feature (for commands and files/folders).
 - [x] Account system and prompt customization (`login`/`nick` and `color`), interconnected with broadcast events (`wall`).
+- [x] Commands with global visual impact (`clearall` for all visitors and `matrix` for responsive HTML5 Canvas digital rain animations on all screens).
 
-## Upcoming Features
-- Commands with global visual impact (e.g., `clearall` for all visitors or `matrix` for animations on all screens).
-- More advanced file editing system.
+## Future Ideas
+- More advanced file editing system (e.g. multi-line text editor like nano/vim).
+- Persistent state (saving the VFS to disk instead of memory).

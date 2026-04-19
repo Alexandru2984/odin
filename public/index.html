@@ -4,7 +4,6 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>WebOS | Odin Core</title>
-    <!-- xterm.js din CDN -->
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" />
     <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
@@ -20,17 +19,35 @@
             justify-content: center;
             align-items: center;
             height: 100vh;
+            width: 100vw;
         }
         #terminal-container {
             width: 100%;
             height: 100%;
             padding: 10px;
             box-sizing: border-box;
+            z-index: 1;
+        }
+        #matrix-canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 10;
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity 1s ease-in-out;
+        }
+        .matrix-active {
+            opacity: 1 !important;
         }
     </style>
 </head>
 <body>
     <div id="terminal-container"></div>
+    <canvas id="matrix-canvas"></canvas>
+
     <script>
         const term = new Terminal({
             cursorBlink: true,
@@ -40,7 +57,7 @@
                 cursor: '#00FF00'
             },
             fontFamily: '"Fira Code", monospace',
-            fontSize: 16
+            fontSize: window.innerWidth < 600 ? 12 : 16 // Responsive font size
         });
         
         const fitAddon = new FitAddon.FitAddon();
@@ -49,7 +66,9 @@
         fitAddon.fit();
 
         window.addEventListener('resize', () => {
+            term.options.fontSize = window.innerWidth < 600 ? 12 : 16;
             fitAddon.fit();
+            resizeMatrix();
         });
 
         term.writeln('Welcome to WebOS (Odin/VPS Kernel 1.0.0)');
@@ -65,6 +84,18 @@
                 term.writeln('\x1b[32mConnected to core.\x1b[0m\r\n');
             };
             ws.onmessage = (event) => {
+                if (typeof event.data === 'string') {
+                    if (event.data.includes('___MATRIX_START___')) {
+                        startMatrix();
+                        term.write(event.data.replace('___MATRIX_START___', ''));
+                        return;
+                    }
+                    if (event.data.includes('___MATRIX_STOP___')) {
+                        stopMatrix();
+                        term.write(event.data.replace('___MATRIX_STOP___', ''));
+                        return;
+                    }
+                }
                 term.write(event.data);
             };
             ws.onclose = () => {
@@ -78,15 +109,75 @@
 
         connect();
 
-        let currentInput = "";
-
         term.onData(e => {
             if (ws && ws.readyState === WebSocket.OPEN) {
-                // Trimitem un pachet JSON catre server pentru fiecare input, sau raw text
-                // Pentru simplicitate, trimitem ce a tastat utilizatorul (1 caracter per tasta)
                 ws.send(e);
             }
         });
+
+        // --- Matrix Digital Rain Logic ---
+        const canvas = document.getElementById('matrix-canvas');
+        const ctx = canvas.getContext('2d');
+        let matrixInterval;
+
+        const katakana = 'アァカサタナハマヤャラワガザダバパイィキシチニヒミリヰギジヂビピウゥクスツヌフムユュルグズブヅプエェケセテネヘメレゲゼデベペオォコソトノホモヨョロゴゾドボポヴッン';
+        const latin = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+        const nums = '0123456789';
+        const alphabet = katakana + latin + nums;
+
+        const fontSize = 16;
+        let columns;
+        let drops;
+
+        function resizeMatrix() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+            columns = canvas.width / fontSize;
+            drops = [];
+            for(let x = 0; x < columns; x++) {
+                drops[x] = 1;
+            }
+        }
+        resizeMatrix();
+
+        function drawMatrix() {
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.05)';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            
+            ctx.fillStyle = '#0F0';
+            ctx.font = fontSize + 'px monospace';
+
+            for(let i = 0; i < drops.length; i++) {
+                const text = alphabet.charAt(Math.floor(Math.random() * alphabet.length));
+                ctx.fillText(text, i * fontSize, drops[i] * fontSize);
+                
+                if(drops[i] * fontSize > canvas.height && Math.random() > 0.975) {
+                    drops[i] = 0;
+                }
+                drops[i]++;
+            }
+        }
+
+        function startMatrix() {
+            canvas.classList.add('matrix-active');
+            if (matrixInterval) clearInterval(matrixInterval);
+            // Clear canvas instantly for fresh start
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            resizeMatrix();
+            matrixInterval = setInterval(drawMatrix, 30);
+            
+            // Auto stop after 6 seconds
+            setTimeout(stopMatrix, 6000);
+        }
+
+        function stopMatrix() {
+            canvas.classList.remove('matrix-active');
+            setTimeout(() => {
+                if (matrixInterval && !canvas.classList.contains('matrix-active')) {
+                    clearInterval(matrixInterval);
+                }
+            }, 1000); // wait for fade out transition
+        }
     </script>
 </body>
 </html>
