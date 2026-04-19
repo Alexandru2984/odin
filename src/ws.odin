@@ -5,7 +5,7 @@ import "core:net"
 import "core:sync"
 
 handle_ws_connection :: proc(client: ^Client) {
-	ws_send_text(client, fmt.tprintf("guest_%d@webos:~$ ", client.id))
+	ws_send_text(client, fmt.tprintf("guest_%d@webos:%s$ ", client.id, client.cwd))
 
 	for {
 		buf: [4096]byte
@@ -42,12 +42,14 @@ handle_ws_connection :: proc(client: ^Client) {
 						cmd := string(client.input_buffer[:client.input_len])
 						process_command(client, cmd)
 						client.input_len = 0
-						ws_send_text(client, fmt.tprintf("guest_%d@webos:~$ ", client.id))
+						ws_send_text(client, fmt.tprintf("guest_%d@webos:%s$ ", client.id, client.cwd))
 					} else if char == '\x7f' || char == '\b' {
 						if client.input_len > 0 {
 							client.input_len -= 1
 							ws_send_text(client, "\b \b")
 						}
+					} else if char == '\t' {
+						handle_autocomplete(client)
 					} else {
 						if client.input_len < 256 {
 							client.input_buffer[client.input_len] = char
