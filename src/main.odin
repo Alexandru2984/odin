@@ -5,6 +5,7 @@ import "core:net"
 import "core:os"
 import "core:thread"
 import "core:sync"
+import "core:strings"
 
 PORT :: 47271
 
@@ -15,6 +16,8 @@ Client :: struct {
 	input_len:    int,
 	send_lock:    sync.Mutex,
 	cwd:          string,
+	name:         string,
+	color:        string,
 }
 
 g_vfs: VFS
@@ -55,6 +58,8 @@ main :: proc() {
 		client_ptr.socket = client_socket
 		client_ptr.id = client_id_counter
 		client_ptr.cwd = "/"
+		client_ptr.name = strings.clone(fmt.tprintf("guest_%d", client_id_counter))
+		client_ptr.color = "32" // default green
 		client_id_counter += 1
 
 		sync.mutex_lock(&g_clients_lock)
@@ -84,6 +89,7 @@ client_handler :: proc(t: ^thread.Thread) {
 	}
 	sync.mutex_unlock(&g_clients_lock)
 
+	delete(client.name)
 	net.close(client.socket)
 	free(client)
 }

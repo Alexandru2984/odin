@@ -28,7 +28,7 @@ handle_autocomplete :: proc(client: ^Client) {
 	}
 
 	if is_cmd {
-		commands := []string{"ls", "cd", "pwd", "mkdir", "rmdir", "rm", "echo", "cat", "wall", "whoami", "help"}
+		commands := []string{"ls", "cd", "pwd", "mkdir", "rmdir", "rm", "echo", "cat", "wall", "whoami", "help", "login", "color"}
 		for c in commands {
 			if strings.has_prefix(c, prefix) {
 				append(&matches, strings.clone(c))
@@ -100,7 +100,7 @@ handle_autocomplete :: proc(client: ^Client) {
 			ws_send_text(client, fmt.tprintf("%s  ", m))
 		}
 		ws_send_text(client, "\r\n")
-		ws_send_text(client, fmt.tprintf("guest_%d@webos:%s$ %s", client.id, client.cwd, current_input))
+		ws_send_text(client, fmt.tprintf("\x1b[%sm%s\x1b[0m@webos:%s$ %s", client.color, client.name, client.cwd, current_input))
 	}
 }
 
@@ -133,7 +133,7 @@ process_command :: proc(client: ^Client, cmd_line: string) {
 		}
 		target := vfs_resolve_path(client.cwd, parts[1])
 		if vfs_mkdir(&g_vfs, target) {
-			broadcast_message(fmt.tprintf("\r\n\x1b[33m[System]\x1b[0m guest_%d created directory '%s'\r\n", client.id, parts[1]), client.id)
+			broadcast_message(fmt.tprintf("\r\n\x1b[33m[System]\x1b[0m \x1b[%sm%s\x1b[0m created directory '%s'\r\n", client.color, client.name, parts[1]), client.id)
 		} else {
 			ws_send_text(client, fmt.tprintf("mkdir: cannot create directory '%s': File exists or parent missing\r\n", parts[1]))
 		}
@@ -144,7 +144,7 @@ process_command :: proc(client: ^Client, cmd_line: string) {
 		}
 		target := vfs_resolve_path(client.cwd, parts[1])
 		if vfs_rmdir(&g_vfs, target) {
-			broadcast_message(fmt.tprintf("\r\n\x1b[33m[System]\x1b[0m guest_%d removed directory '%s'\r\n", client.id, parts[1]), client.id)
+			broadcast_message(fmt.tprintf("\r\n\x1b[33m[System]\x1b[0m \x1b[%sm%s\x1b[0m removed directory '%s'\r\n", client.color, client.name, parts[1]), client.id)
 		} else {
 			ws_send_text(client, fmt.tprintf("rmdir: failed to remove '%s'\r\n", parts[1]))
 		}
@@ -155,7 +155,7 @@ process_command :: proc(client: ^Client, cmd_line: string) {
 		}
 		target := vfs_resolve_path(client.cwd, parts[1])
 		if vfs_rm(&g_vfs, target) {
-			broadcast_message(fmt.tprintf("\r\n\x1b[33m[System]\x1b[0m guest_%d deleted file '%s'\r\n", client.id, parts[1]), client.id)
+			broadcast_message(fmt.tprintf("\r\n\x1b[33m[System]\x1b[0m \x1b[%sm%s\x1b[0m deleted file '%s'\r\n", client.color, client.name, parts[1]), client.id)
 		} else {
 			ws_send_text(client, fmt.tprintf("rm: cannot remove '%s': No such file\r\n", parts[1]))
 		}
@@ -198,7 +198,7 @@ process_command :: proc(client: ^Client, cmd_line: string) {
 			if file_target != "" {
 				target := vfs_resolve_path(client.cwd, file_target)
 				if vfs_write(&g_vfs, target, text_to_echo) {
-					broadcast_message(fmt.tprintf("\r\n\x1b[33m[System]\x1b[0m guest_%d created/updated file '%s'\r\n", client.id, target), client.id)
+					broadcast_message(fmt.tprintf("\r\n\x1b[33m[System]\x1b[0m \x1b[%sm%s\x1b[0m created/updated file '%s'\r\n", client.color, client.name, target), client.id)
 				} else {
 					ws_send_text(client, fmt.tprintf("echo: cannot create file '%s': Parent directory missing or is a directory\r\n", target))
 				}
@@ -235,15 +235,45 @@ process_command :: proc(client: ^Client, cmd_line: string) {
 		msg := ""
 		if len(cmd_line_trim) > 4 { msg = strings.trim_space(cmd_line_trim[4:]) }
 		if msg != "" {
-			broadcast_message(fmt.tprintf("\r\n\x1b[31m[WALL]\x1b[0m guest_%d: %s\r\n", client.id, msg), client.id)
+			broadcast_message(fmt.tprintf("\r\n\x1b[31m[WALL]\x1b[0m \x1b[%sm%s\x1b[0m: %s\r\n", client.color, client.name, msg), client.id)
 			ws_send_text(client, "Message sent to everyone.\r\n")
 		} else {
 			ws_send_text(client, "wall: missing message\r\n")
 		}
 	} else if cmd == "whoami" {
-		ws_send_text(client, fmt.tprintf("guest_%d\r\n", client.id))
+		ws_send_text(client, fmt.tprintf("\x1b[%sm%s\x1b[0m\r\n", client.color, client.name))
+	} else if cmd == "login" || cmd == "nick" {
+		if len(parts) < 2 {
+			ws_send_text(client, "login: missing name\r\n")
+			return
+		}
+		new_name := parts[1]
+		if len(new_name) > 20 {
+			ws_send_text(client, "login: name too long (max 20 chars)\r\n")
+			return
+		}
+		
+		old_name := client.name
+		client.name = strings.clone(new_name)
+		
+		broadcast_message(fmt.tprintf("\r\n\x1b[33m[System]\x1b[0m \x1b[%sm%s\x1b[0m is now known as \x1b[%sm%s\x1b[0m\r\n", client.color, old_name, client.color, client.name), client.id)
+		ws_send_text(client, fmt.tprintf("You are now known as \x1b[%sm%s\x1b[0m\r\n", client.color, client.name))
+		delete(old_name)
+
+	} else if cmd == "color" {
+		if len(parts) < 2 {
+			ws_send_text(client, "color: missing color code (e.g. 31=red, 32=green, 33=yellow, 34=blue, 35=magenta, 36=cyan)\r\n")
+			return
+		}
+		color_code := parts[1]
+		if color_code >= "31" && color_code <= "36" {
+			client.color = color_code // This is a static literal string slice so we don't clone it
+			ws_send_text(client, fmt.tprintf("Color changed to \x1b[%sm%s\x1b[0m\r\n", client.color, color_code))
+		} else {
+			ws_send_text(client, "color: invalid color code. Use 31 to 36.\r\n")
+		}
 	} else if cmd == "help" {
-		ws_send_text(client, "Commands: ls, cd, pwd, mkdir, rmdir, rm, echo, cat, wall, whoami, help\r\n")
+		ws_send_text(client, "Commands: ls, cd, pwd, mkdir, rmdir, rm, echo, cat, wall, whoami, login, color, help\r\n")
 	} else {
 		ws_send_text(client, fmt.tprintf("webos: %s: command not found\r\n", cmd))
 	}
@@ -256,7 +286,7 @@ broadcast_message :: proc(msg: string, exclude_id: int) {
 	for c in g_clients {
 		if c.id != exclude_id {
 			ws_send_text(c, msg)
-			ws_send_text(c, fmt.tprintf("guest_%d@webos:%s$ ", c.id, c.cwd))
+			ws_send_text(c, fmt.tprintf("\x1b[%sm%s\x1b[0m@webos:%s$ ", c.color, c.name, c.cwd))
 		}
 	}
 }
