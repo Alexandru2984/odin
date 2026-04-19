@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebOS | Odin Core</title>
+    <!-- xterm.js din CDN -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" />
+    <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #000;
+            color: #0f0;
+            font-family: monospace;
+            overflow: hidden;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+        }
+        #terminal-container {
+            width: 100%;
+            height: 100%;
+            padding: 10px;
+            box-sizing: border-box;
+        }
+    </style>
+</head>
+<body>
+    <div id="terminal-container"></div>
+    <script>
+        const term = new Terminal({
+            cursorBlink: true,
+            theme: {
+                background: '#000000',
+                foreground: '#00FF00',
+                cursor: '#00FF00'
+            },
+            fontFamily: '"Fira Code", monospace',
+            fontSize: 16
+        });
+        
+        const fitAddon = new FitAddon.FitAddon();
+        term.loadAddon(fitAddon);
+        term.open(document.getElementById('terminal-container'));
+        fitAddon.fit();
+
+        window.addEventListener('resize', () => {
+            fitAddon.fit();
+        });
+
+        term.writeln('Welcome to WebOS (Odin/VPS Kernel 1.0.0)');
+        term.writeln('Connecting to central server...');
+
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = `${protocol}//${window.location.host}/ws`;
+        
+        let ws;
+        function connect() {
+            ws = new WebSocket(wsUrl);
+            ws.onopen = () => {
+                term.writeln('\x1b[32mConnected to core.\x1b[0m\r\n');
+            };
+            ws.onmessage = (event) => {
+                term.write(event.data);
+            };
+            ws.onclose = () => {
+                term.writeln('\r\n\x1b[31mConnection lost. Reconnecting in 3s...\x1b[0m');
+                setTimeout(connect, 3000);
+            };
+            ws.onerror = (err) => {
+                console.error("WebSocket error", err);
+            };
+        }
+
+        connect();
+
+        let currentInput = "";
+
+        term.onData(e => {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                // Trimitem un pachet JSON catre server pentru fiecare input, sau raw text
+                // Pentru simplicitate, trimitem ce a tastat utilizatorul (1 caracter per tasta)
+                ws.send(e);
+            }
+        });
+    </script>
+</body>
+</html>
