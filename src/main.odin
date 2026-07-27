@@ -345,6 +345,7 @@ run_terminal_session :: proc(socket: net.TCP_Socket, ip: string) {
 
 	send_welcome(client)
 	client_send_prompt(client)
+	broadcast_stat()
 
 	name_for_notice := client_get_name(client, context.temp_allocator)
 	broadcast_notice(
@@ -380,6 +381,7 @@ run_terminal_session :: proc(socket: net.TCP_Socket, ip: string) {
 	free(client)
 
 	broadcast_notice(fmt.tprintf("\x1b[33m*\x1b[0m %s disconnected\r\n", departed), -1)
+	broadcast_stat()
 }
 
 terminal_loop :: proc(client: ^Client, conn: ^WS_Conn) {
@@ -437,9 +439,11 @@ terminal_loop :: proc(client: ^Client, conn: ^WS_Conn) {
 			handle_input(client, string(msg.payload))
 
 		case .Binary:
-			// The terminal protocol is text-only.
-			client_close(client, .Unsupported, "binary frames not supported")
-			return
+			// The client's control channel: terminal size, and anything added
+			// later. Kept separate from the text stream for the same reason the
+			// server's own control messages are — so nothing a user types can
+			// be mistaken for one.
+			handle_client_control(client, msg.payload)
 
 		case .Ping:
 			pong := ws_encode_frame(.Pong, msg.payload, context.temp_allocator)
@@ -469,11 +473,13 @@ send_welcome :: proc(client: ^Client) {
 	strings.write_string(&b, "    \\_/\\_/\\___|_.__/\\___/|___/\r\n")
 	strings.write_string(&b, "\x1b[0m\r\n")
 
+	online := client_count()
 	fmt.sbprintf(
 		&b,
-		"  \x1b[90mWebOS %s — an Odin kernel, %d users online\x1b[0m\r\n",
+		"  \x1b[90mWebOS %s — an Odin kernel, %d %s online\x1b[0m\r\n",
 		SERVER_VERSION,
-		client_count(),
+		online,
+		online == 1 ? "user" : "users",
 	)
 	strings.write_string(
 		&b,

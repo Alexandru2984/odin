@@ -817,17 +817,31 @@ cmd_df :: proc(ctx: ^Cmd_Ctx, args: []string) {
 	outf(ctx, "Filesystem      Used      Avail     Use%%\n")
 	outf(
 		ctx,
-		"entries      %s   %s   %5.1f%%\n",
+		"entries      %s   %s   %s%%\n",
 		pad_int(u.entries, 7),
 		pad_int(u.max_entries - u.entries, 8),
-		pct_entries,
+		pad_percent(pct_entries),
 	)
 	outf(
 		ctx,
-		"storage      %7s   %8s   %5.1f%%\n",
+		"storage      %7s   %8s   %s%%\n",
 		human_size(u.total_bytes, context.temp_allocator),
 		human_size(u.max_bytes - u.total_bytes, context.temp_allocator),
-		pct_bytes,
+		pad_percent(pct_bytes),
+	)
+}
+
+// A percentage right-aligned in five columns.
+//
+// "%5.1f" zero-pads exactly as the integer verbs do, so 0.0% rendered as
+// "000.0%".
+@(private = "file")
+pad_percent :: proc(value: f64) -> string {
+	return fmt.aprintf(
+		"%*s",
+		5,
+		fmt.tprintf("%.1f", value),
+		allocator = context.temp_allocator,
 	)
 }
 

@@ -66,6 +66,12 @@ Client :: struct {
 	echo_off:     bool,
 	prompt_label: string, // owned; "" means the normal shell prompt
 
+	// The client's terminal size, as it last reported it. Read while
+	// formatting output, which can happen on another thread during a
+	// broadcast, so it lives under the same lock.
+	cols: int,
+	rows: int,
+
 	// --- Reader-thread-private state ----------------------------------------
 	history:    [dynamic]string,
 	hist_pos:   int,
@@ -114,6 +120,11 @@ client_init :: proc(c: ^Client, socket: net.TCP_Socket, id: int, ip: string) {
 	c.history = make([dynamic]string, 0, 16)
 	c.hist_pos = -1
 	c.vars = make(map[string]string)
+
+	// Assume a conventional terminal until the client says otherwise, so the
+	// welcome banner is laid out sensibly even before the first size report.
+	c.cols = DEFAULT_TERM_COLS
+	c.rows = DEFAULT_TERM_ROWS
 
 	c.name = fmt.aprintf("guest%d", id)
 	c.color = strings.clone("32") // green

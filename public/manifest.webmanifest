@@ -1,0 +1,17 @@
+{
+  "name": "WebOS — a shared terminal",
+  "short_name": "WebOS",
+  "description": "A multi-user terminal in your browser, with a shared filesystem and a real shell.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0b0f10",
+  "theme_color": "#0b0f10",
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "/icon-512-maskable.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" },
+    { "src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml" }
+  ]
+}

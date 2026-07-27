@@ -26,12 +26,172 @@ client_send_control :: proc(c: ^Client, json: string) {
 	client_enqueue(c, framed)
 }
 
+// ---------------------------------------------------------------------------
+// Building control messages
+//
+// These are assembled by hand rather than with fmt.tprintf, for two reasons.
+//
+// Odin's fmt treats '{' as the start of a format verb, so a format string
+// containing JSON does not produce JSON: `{"t":"stat","users":%d}` came out as
+// `%!(MISSING CLOSE BRACE)t":"stat","users":1}`, which the client then failed
+// to parse and silently dropped.
+//
+// And any value that ever comes from a user has to be escaped. Interpolating a
+// name straight into JSON is the same class of mistake as building SQL with
+// string concatenation.
+// ---------------------------------------------------------------------------
+
+@(private = "file")
+json_escape_into :: proc(b: ^strings.Builder, s: string) {
+	for r in s {
+		switch r {
+		case '"':
+			strings.write_string(b, "\\\"")
+		case '\\':
+			strings.write_string(b, "\\\\")
+		case '\n':
+			strings.write_string(b, "\\n")
+		case '\r':
+			strings.write_string(b, "\\r")
+		case '\t':
+			strings.write_string(b, "\\t")
+		case:
+			if r < 0x20 {
+				fmt.sbprintf(b, "\\u%04x", int(r))
+			} else {
+				strings.write_rune(b, r)
+			}
+		}
+	}
+}
+
+@(private = "file")
+control_open :: proc(b: ^strings.Builder, type_name: string) {
+	strings.write_string(b, "{\"t\":\"")
+	json_escape_into(b, type_name)
+	strings.write_string(b, "\"")
+}
+
+// A control message with no payload, e.g. {"t":"bell"}.
+control_msg :: proc(type_name: string) -> string {
+	b := strings.builder_make(context.temp_allocator)
+	control_open(&b, type_name)
+	strings.write_string(&b, "}")
+	return strings.to_string(b)
+}
+
+control_msg_int :: proc(type_name: string, key: string, value: int) -> string {
+	b := strings.builder_make(context.temp_allocator)
+	control_open(&b, type_name)
+	strings.write_string(&b, ",\"")
+	json_escape_into(&b, key)
+	strings.write_string(&b, "\":")
+	strings.write_int(&b, value)
+	strings.write_string(&b, "}")
+	return strings.to_string(b)
+}
+
+control_msg_str :: proc(type_name: string, key: string, value: string) -> string {
+	b := strings.builder_make(context.temp_allocator)
+	control_open(&b, type_name)
+	strings.write_string(&b, ",\"")
+	json_escape_into(&b, key)
+	strings.write_string(&b, "\":\"")
+	json_escape_into(&b, value)
+	strings.write_string(&b, "\"}")
+	return strings.to_string(b)
+}
+
 broadcast_control :: proc(json: string) {
 	sync.mutex_lock(&g_clients_lock)
 	defer sync.mutex_unlock(&g_clients_lock)
 	for c in g_clients {
 		client_send_control(c, json)
 	}
+}
+
+// Tells every client how many sessions are open, for the status bar.
+//
+// Sent on the control channel rather than printed, so it updates silently
+// instead of interrupting whatever someone is in the middle of typing.
+broadcast_stat :: proc() {
+	count := client_count()
+	broadcast_control(control_msg_int("stat", "users", count))
+}
+
+// Must match the themes defined in public/style.css. The client ignores any
+// name it does not recognise, so this cannot push arbitrary styling into
+// someone's browser — the worst a mismatch does is nothing.
+@(rodata)
+THEMES := [?]string{"dark", "amber", "ocean", "mono", "paper"}
+
+cmd_theme :: proc(ctx: ^Cmd_Ctx, args: []string) {
+	if len(args) == 0 {
+		out(ctx, "usage: theme <name>\n")
+		outf(ctx, "available: %s\n", strings.join(THEMES[:], ", ", context.temp_allocator))
+		out(ctx, "\x1b[90m(the ◐ button in the status bar cycles through them too)\x1b[0m\n")
+		return
+	}
+
+	requested := strings.to_lower(args[0], context.temp_allocator)
+	for name in THEMES {
+		if name != requested {
+			continue
+		}
+		client_send_control(ctx.client, control_msg_str("theme", "name", name))
+		outf(ctx, "theme set to \x1b[1m%s\x1b[0m\n", name)
+		return
+	}
+
+	errf(ctx, "theme: no theme called '%s'\n", sanitize_text(args[0], 20, context.temp_allocator))
+	outf(ctx, "available: %s\n", strings.join(THEMES[:], ", ", context.temp_allocator))
+}
+
+cmd_bell :: proc(ctx: ^Cmd_Ctx, args: []string) {
+	c := ctx.client
+
+	if len(args) == 0 {
+		client_send_control(c, control_msg("bell"))
+		out(ctx, "\x1b[90mding\x1b[0m\n")
+		return
+	}
+
+	// Ringing someone else's terminal is an interruption, so it costs from the
+	// same budget as any other broadcast.
+	if !rate_allow(&c.rl_broadcast) {
+		errf(ctx, "bell: too soon, wait %.0fs\n", rate_retry_after(&c.rl_broadcast))
+		return
+	}
+
+	target := args[0]
+	from := client_get_name(c, context.temp_allocator)
+	delivered := 0
+
+	sync.mutex_lock(&g_clients_lock)
+	for other in g_clients {
+		if other.id == c.id {
+			continue
+		}
+		sync.mutex_lock(&other.state_lock)
+		matches := strings.equal_fold(other.name, target)
+		sync.mutex_unlock(&other.state_lock)
+
+		if matches {
+			client_send_control(other, control_msg("bell"))
+			client_send_notice(
+				other,
+				fmt.tprintf("\x1b[33m*\x1b[0m %s is trying to get your attention\r\n", from),
+			)
+			delivered += 1
+		}
+	}
+	sync.mutex_unlock(&g_clients_lock)
+
+	if delivered == 0 {
+		errf(ctx, "bell: %s is not online\n", sanitize_text(target, MAX_NAME_LEN, context.temp_allocator))
+		return
+	}
+	outf(ctx, "\x1b[90mrang %d session(s)\x1b[0m\n", delivered)
 }
 
 // ---------------------------------------------------------------------------
@@ -623,7 +783,7 @@ cmd_matrix :: proc(ctx: ^Cmd_Ctx, args: []string) {
 		fmt.tprintf("\x1b[32m*\x1b[0m %s started the matrix\r\n", name),
 		-1,
 	)
-	broadcast_control(`{"t":"matrix","ms":6000}`)
+	broadcast_control(control_msg_int("matrix", "ms", MATRIX_DURATION_MS))
 }
 
 cmd_clearall :: proc(ctx: ^Cmd_Ctx, args: []string) {

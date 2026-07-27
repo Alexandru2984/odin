@@ -180,5 +180,9 @@ MAX_CONCURRENT_HASHES :: 2
 @(rodata)
 DEFAULT_ALLOWED_ORIGINS := [?]string{"https://odin.micutu.com"}
 
+// How long the client runs the digital-rain overlay, in milliseconds. Lives
+// here rather than in the command so the client and server agree on it.
+MATRIX_DURATION_MS :: 6000
+
 SERVER_NAME    :: "webos"
 SERVER_VERSION :: "2.0.0"

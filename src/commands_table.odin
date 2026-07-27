@@ -93,6 +93,7 @@ COMMANDS := [?]Command {
 	{"wall", CAT_SOCIAL, "wall <message>", "Send a message to every connected terminal.", cmd_wall},
 	{"msg", CAT_SOCIAL, "msg <user> <message>", "Send a private message to one user.", cmd_msg},
 	{"me", CAT_SOCIAL, "me <action>", "Broadcast an action, IRC style.", cmd_me},
+	{"bell", CAT_SOCIAL, "bell [user]", "Flash a terminal to get someone's attention.", cmd_bell},
 
 	// --- System -------------------------------------------------------------
 	{"help", CAT_SYS, "help [command|category]", "Show this help, or help for one command.", cmd_help},
@@ -111,6 +112,7 @@ COMMANDS := [?]Command {
 	{"dmesg", CAT_SYS, "dmesg", "Show recent request rejections.", cmd_dmesg},
 	{"version", CAT_SYS, "version", "Show version and build information.", cmd_version},
 	{"neofetch", CAT_SYS, "neofetch", "Show system information with art.", cmd_neofetch},
+	{"theme", CAT_SYS, "theme <name>", "Change your terminal's colour scheme.", cmd_theme},
 
 	// --- Fun ----------------------------------------------------------------
 	{"banner", CAT_FUN, "banner <text>", "Print text as large block letters.", cmd_banner},
@@ -153,46 +155,116 @@ cmd_help :: proc(ctx: ^Cmd_Ctx, args: []string) {
 	}
 
 	outf(ctx, "\x1b[1mWebOS %s\x1b[0m — %d commands\n", SERVER_VERSION, len(COMMANDS))
-	out(ctx, "\x1b[90mhelp <command> for details, help <category> for one section\x1b[0m\n")
+
+	narrow := ctx_is_narrow(ctx)
+	if narrow {
+		out(ctx, "\x1b[90mhelp <command> for what each one does\x1b[0m\n")
+	} else {
+		out(ctx, "\x1b[90mhelp <command> for details, help <category> for one section\x1b[0m\n")
+	}
 
 	for cat in CATEGORY_ORDER {
 		print_category(ctx, cat, false)
 	}
 
 	out(ctx, "\n\x1b[1mShell\x1b[0m\n")
-	out(ctx, "  \x1b[36ma | b\x1b[0m    feed a's output into b        ")
-	out(ctx, "\x1b[36m> \x1b[0mfile    write output to a file\n")
-	out(ctx, "  \x1b[36ma && b\x1b[0m   run b only if a succeeded     ")
-	out(ctx, "\x1b[36m>>\x1b[0mfile    append output to a file\n")
-	out(ctx, "  \x1b[36ma || b\x1b[0m   run b only if a failed        ")
-	out(ctx, "\x1b[36ma ; b\x1b[0m     run both regardless\n")
-	out(ctx, "  \x1b[36m$VAR\x1b[0m     expand a variable             ")
-	out(ctx, "\x1b[36m$?\x1b[0m        status of the last command\n")
-	out(ctx, "  \x1b[36mN=value\x1b[0m  set a variable                ")
-	out(ctx, "\x1b[36m'\x1b[0m \x1b[36m\"\x1b[0m       quote, to keep spaces\n")
+	if narrow {
+		out(ctx, "  \x1b[36ma | b\x1b[0m    feed a's output into b\n")
+		out(ctx, "  \x1b[36ma && b\x1b[0m   run b only if a succeeded\n")
+		out(ctx, "  \x1b[36ma || b\x1b[0m   run b only if a failed\n")
+		out(ctx, "  \x1b[36m> \x1b[0mfile   write output to a file\n")
+		out(ctx, "  \x1b[36m>>\x1b[0mfile   append to a file\n")
+		out(ctx, "  \x1b[36m$VAR\x1b[0m     expand a variable\n")
+		out(ctx, "  \x1b[36m$?\x1b[0m       status of the last command\n")
+	} else {
+		out(ctx, "  \x1b[36ma | b\x1b[0m    feed a's output into b        ")
+		out(ctx, "\x1b[36m> \x1b[0mfile    write output to a file\n")
+		out(ctx, "  \x1b[36ma && b\x1b[0m   run b only if a succeeded     ")
+		out(ctx, "\x1b[36m>>\x1b[0mfile    append output to a file\n")
+		out(ctx, "  \x1b[36ma || b\x1b[0m   run b only if a failed        ")
+		out(ctx, "\x1b[36ma ; b\x1b[0m     run both regardless\n")
+		out(ctx, "  \x1b[36m$VAR\x1b[0m     expand a variable             ")
+		out(ctx, "\x1b[36m$?\x1b[0m        status of the last command\n")
+		out(ctx, "  \x1b[36mN=value\x1b[0m  set a variable                ")
+		out(ctx, "\x1b[36m'\x1b[0m \x1b[36m\"\x1b[0m       quote, to keep spaces\n")
+	}
 
 	out(ctx, "\n\x1b[1mKeys\x1b[0m\n")
-	out(ctx, "  \x1b[36mTab\x1b[0m complete    \x1b[36m^A\x1b[0m/\x1b[36m^E\x1b[0m line start/end    ")
-	out(ctx, "\x1b[36m^W\x1b[0m delete word\n")
-	out(ctx, "  \x1b[36m^C\x1b[0m cancel      \x1b[36m^U\x1b[0m/\x1b[36m^K\x1b[0m kill to start/end  ")
-	out(ctx, "\x1b[36m^L\x1b[0m clear\n")
-	out(ctx, "  \x1b[36mUp\x1b[0m/\x1b[36mDown\x1b[0m history\n")
+	if narrow {
+		// A touch device has the key bar for these, so name them plainly.
+		out(ctx, "  \x1b[36mtab\x1b[0m complete   \x1b[36m↑\x1b[0m/\x1b[36m↓\x1b[0m history\n")
+		out(ctx, "  \x1b[36mctrl\x1b[0m then a letter for ^C, ^L, ^U\n")
+	} else {
+		out(ctx, "  \x1b[36mTab\x1b[0m complete    \x1b[36m^A\x1b[0m/\x1b[36m^E\x1b[0m line start/end    ")
+		out(ctx, "\x1b[36m^W\x1b[0m delete word\n")
+		out(ctx, "  \x1b[36m^C\x1b[0m cancel      \x1b[36m^U\x1b[0m/\x1b[36m^K\x1b[0m kill to start/end  ")
+		out(ctx, "\x1b[36m^L\x1b[0m clear\n")
+		out(ctx, "  \x1b[36mUp\x1b[0m/\x1b[36mDown\x1b[0m history\n")
+	}
 }
 
 @(private = "file")
 print_category :: proc(ctx: ^Cmd_Ctx, category: string, verbose: bool) {
 	outf(ctx, "\n\x1b[1;33m%s\x1b[0m\n", strings.to_upper(category, context.temp_allocator))
 
+	// On a phone there is no room for a description beside the name: the
+	// second column wraps under the first and the whole list becomes ribbon.
+	narrow := ctx_is_narrow(ctx)
+
+	if narrow && !verbose {
+		print_names_in_columns(ctx, category)
+		return
+	}
+
 	for cmd in COMMANDS {
 		if cmd.category != category {
 			continue
 		}
+
+		if narrow {
+			// Stacked: the usage line, then its description indented beneath.
+			outf(ctx, "  \x1b[36m%s\x1b[0m\n", cmd.usage)
+			outf(ctx, "    \x1b[90m%s\x1b[0m\n", cmd.help)
+			continue
+		}
+
 		if verbose {
 			outf(ctx, "  \x1b[36m%-32s\x1b[0m %s\n", cmd.usage, cmd.help)
 		} else {
 			outf(ctx, "  \x1b[36m%-12s\x1b[0m %s\n", cmd.name, cmd.help)
 		}
 	}
+}
+
+// Lists just the command names, packed into as many columns as fit.
+@(private = "file")
+print_names_in_columns :: proc(ctx: ^Cmd_Ctx, category: string) {
+	COLUMN :: 12
+
+	width := ctx_width(ctx)
+	per_row := max(1, (width - 2) / COLUMN)
+
+	b := strings.builder_make(context.temp_allocator)
+	count := 0
+
+	for cmd in COMMANDS {
+		if cmd.category != category {
+			continue
+		}
+		if count % per_row == 0 {
+			strings.write_string(&b, "  ")
+		}
+		fmt.sbprintf(&b, "\x1b[36m%-*s\x1b[0m", COLUMN - 1, cmd.name)
+		count += 1
+		if count % per_row == 0 {
+			strings.write_string(&b, "\n")
+		}
+	}
+	if count % per_row != 0 {
+		strings.write_string(&b, "\n")
+	}
+
+	out(ctx, strings.to_string(b))
 }
 
 @(private = "file")
