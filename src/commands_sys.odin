@@ -38,27 +38,53 @@ broadcast_control :: proc(json: string) {
 // Identity
 // ---------------------------------------------------------------------------
 
+// The inline forms below still work — a script has no way to answer a prompt —
+// but the password was on screen while it was typed, so say so once.
+@(private = "file")
+warn_inline_secret :: proc(ctx: ^Cmd_Ctx) {
+	out(
+		ctx,
+		"\x1b[33mnote:\x1b[0m that password was visible on screen. Run the command with no\n" +
+		"      password next time and it will be asked for privately.\n",
+	)
+}
+
 cmd_register :: proc(ctx: ^Cmd_Ctx, args: []string) {
 	c := ctx.client
 
-	if len(args) < 2 {
-		errf(ctx, "register: usage: register <username> <password>\n")
-		out(ctx, "  Passwords are at least 8 characters. Nothing here is a secret\n")
-		out(ctx, "  worth protecting, so please do not reuse a real password.\n")
-		return
-	}
 	if client_is_authed(c) {
 		errf(ctx, "register: already logged in (use logout first)\n")
 		return
 	}
+
+	// Interactive: ask for whatever was not supplied, with the password masked.
+	switch len(args) {
+	case 0:
+		ask_begin(c, .Register_User, "Choose a username: ", false)
+		return
+	case 1:
+		if ok, reason := validate_username(args[0]); !ok {
+			errf(ctx, "register: %s\n", reason)
+			return
+		}
+		ask_set_user(c, args[0])
+		ask_begin(c, .Register_Pass, "Password: ", true)
+		return
+	}
+
+	warn_inline_secret(ctx)
+	finish_register(ctx, args[0], join_args(args[1:]))
+}
+
+// Creates the account and adopts it for this session. Shared by the inline and
+// interactive forms so they cannot drift apart.
+finish_register :: proc(ctx: ^Cmd_Ctx, name: string, password: string) {
+	c := ctx.client
+
 	if !rate_allow(&c.rl_auth) {
 		errf(ctx, "register: too many attempts, wait %.0fs\n", rate_retry_after(&c.rl_auth))
 		return
 	}
-
-	name := args[0]
-	password := join_args(args[1:])
-
 	if ok, reason := validate_username(name); !ok {
 		errf(ctx, "register: %s\n", reason)
 		return
@@ -83,6 +109,7 @@ cmd_register :: proc(ctx: ^Cmd_Ctx, args: []string) {
 	client_set_name(c, name)
 	client_set_cwd(c, home)
 
+	log_security("register", c, name, true)
 	outf(ctx, "\x1b[32mwelcome, %s\x1b[0m — your home is %s\n", name, home)
 	announce_login(c, name, "registered")
 }
@@ -90,24 +117,38 @@ cmd_register :: proc(ctx: ^Cmd_Ctx, args: []string) {
 cmd_login :: proc(ctx: ^Cmd_Ctx, args: []string) {
 	c := ctx.client
 
-	if len(args) < 2 {
-		errf(ctx, "login: usage: login <username> <password>\n")
-		out(ctx, "  No account yet? Use \x1b[36mregister <username> <password>\x1b[0m\n")
-		out(ctx, "  Just want a nickname? Use \x1b[36mname <nickname>\x1b[0m\n")
+	if client_is_authed(c) {
+		errf(ctx, "login: already logged in (use logout first)\n")
 		return
 	}
+
+	switch len(args) {
+	case 0:
+		ask_begin(c, .Login_User, "Username: ", false)
+		return
+	case 1:
+		ask_set_user(c, args[0])
+		ask_begin(c, .Login_Pass, "Password: ", true)
+		return
+	}
+
+	warn_inline_secret(ctx)
+	finish_login(ctx, args[0], join_args(args[1:]))
+}
+
+finish_login :: proc(ctx: ^Cmd_Ctx, name: string, password: string) {
+	c := ctx.client
+
 	if !rate_allow(&c.rl_auth) {
 		errf(ctx, "login: too many attempts, wait %.0fs\n", rate_retry_after(&c.rl_auth))
 		return
 	}
 
-	name := args[0]
-	password := join_args(args[1:])
-
 	display, err := auth_verify(&g_users, name, password, context.temp_allocator)
 	if err != .None {
 		// Deliberately does not distinguish "no such user" from "wrong
 		// password" — that difference is a username oracle.
+		log_security("login", c, name, false)
 		errf(ctx, "login: %s\n", auth_error_string(.Bad_Credentials))
 		return
 	}
@@ -120,6 +161,7 @@ cmd_login :: proc(ctx: ^Cmd_Ctx, args: []string) {
 	client_set_name(c, display)
 	client_set_cwd(c, home)
 
+	log_security("login", c, display, true)
 	outf(ctx, "\x1b[32mlogged in as %s\x1b[0m\n", display)
 	announce_login(c, display, "logged in")
 }
@@ -160,8 +202,22 @@ cmd_passwd :: proc(ctx: ^Cmd_Ctx, args: []string) {
 		errf(ctx, "passwd: not logged in\n")
 		return
 	}
+
 	if len(args) < 2 {
-		errf(ctx, "passwd: usage: passwd <old-password> <new-password>\n")
+		ask_begin(c, .Passwd_Old, "Current password: ", true)
+		return
+	}
+
+	warn_inline_secret(ctx)
+	finish_passwd(ctx, args[0], args[1])
+}
+
+finish_passwd :: proc(ctx: ^Cmd_Ctx, old_password: string, new_password: string) {
+	c := ctx.client
+
+	user := client_get_user(c, context.temp_allocator)
+	if len(user) == 0 {
+		errf(ctx, "passwd: not logged in\n")
 		return
 	}
 	if !rate_allow(&c.rl_auth) {
@@ -169,10 +225,13 @@ cmd_passwd :: proc(ctx: ^Cmd_Ctx, args: []string) {
 		return
 	}
 
-	if err := auth_change_password(&g_users, user, args[0], args[1]); err != .None {
+	if err := auth_change_password(&g_users, user, old_password, new_password); err != .None {
+		log_security("passwd", c, user, false)
 		errf(ctx, "passwd: %s\n", auth_error_string(err))
 		return
 	}
+
+	log_security("passwd", c, user, true)
 	out(ctx, "\x1b[32mpassword changed\x1b[0m\n")
 }
 
@@ -297,6 +356,16 @@ cmd_who :: proc(ctx: ^Cmd_Ctx, args: []string) {
 
 cmd_finger :: proc(ctx: ^Cmd_Ctx, args: []string) {
 	if len(args) == 0 {
+		// Dumping every registered name to anonymous callers hands over the
+		// account list, which is the first half of a credential-stuffing run.
+		// Holding an account is a low bar, but it is not zero, and it makes the
+		// enumeration attributable.
+		if !client_is_authed(ctx.client) {
+			errf(ctx, "finger: log in to list accounts, or name one directly\n")
+			out(ctx, "  \x1b[36mfinger <username>\x1b[0m works for anyone.\n")
+			return
+		}
+
 		names := auth_list(&g_users, context.temp_allocator)
 		slice.sort(names)
 		outf(ctx, "%d registered account(s):\n", len(names))

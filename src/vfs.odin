@@ -540,6 +540,15 @@ vfs_write :: proc(vfs: ^VFS, p: string, content: string, user: string) -> VFS_Er
 	sync.mutex_lock(&vfs.lock)
 	defer sync.mutex_unlock(&vfs.lock)
 
+	return vfs_write_locked(vfs, p, content, user)
+}
+
+// The body of vfs_write, with the lock already held.
+//
+// Split out so that read-modify-write operations (append) can do the whole
+// sequence under one lock instead of racing with themselves.
+@(private = "file")
+vfs_write_locked :: proc(vfs: ^VFS, p: string, content: string, user: string) -> VFS_Error {
 	parent := path.dir(p, context.temp_allocator)
 	parent_entry, parent_ok := vfs.entries[parent]
 	if !parent_ok {
@@ -605,17 +614,36 @@ vfs_write :: proc(vfs: ^VFS, p: string, content: string, user: string) -> VFS_Er
 }
 
 // Appends to a file, creating it if absent.
+//
+// Read and write happen under a single lock hold. Doing this as a vfs_read
+// followed by a vfs_write let two concurrent appends both read the same
+// contents and both write their own version back, so one of them was silently
+// lost — and with `>>` reachable from any session, concurrent appends to a
+// shared log file are the expected case, not a rare race.
 vfs_append :: proc(vfs: ^VFS, p: string, extra: string, user: string) -> VFS_Error {
-	existing, ok := vfs_read(vfs, p, user)
-	defer if ok {delete(existing)}
-
-	combined: string
-	if ok {
-		combined = strings.concatenate({existing, extra}, context.temp_allocator)
-	} else {
-		combined = extra
+	if err := vfs_validate_path(p); err != .None {
+		return err
 	}
-	return vfs_write(vfs, p, combined, user)
+
+	sync.mutex_lock(&vfs.lock)
+	defer sync.mutex_unlock(&vfs.lock)
+
+	combined := extra
+	if existing, ok := vfs.entries[p]; ok {
+		if existing.type == .Directory {
+			return .Is_A_Directory
+		}
+		if !can_read_entry(existing, user) {
+			return .Permission_Denied
+		}
+		combined = strings.concatenate({existing.content, extra}, context.temp_allocator)
+	}
+
+	if len(combined) > VFS_MAX_FILE_SIZE {
+		return .File_Too_Large
+	}
+
+	return vfs_write_locked(vfs, p, combined, user)
 }
 
 // Returns a copy of the file contents. The caller owns the result.
@@ -666,6 +694,31 @@ vfs_exists :: proc(vfs: ^VFS, p: string) -> bool {
 	sync.mutex_lock(&vfs.lock)
 	defer sync.mutex_unlock(&vfs.lock)
 	return p in vfs.entries
+}
+
+// Whether `user` may make `p` their working directory.
+//
+// vfs_is_dir answers a question about structure and ignores permissions
+// entirely, so using it for `cd` let anyone step into another user's private
+// directory. Nothing could then be listed there, but the difference between
+// "permission denied" and "no such directory" is itself an oracle: it confirms
+// exactly which private paths exist. Both cases are reported as Not_Found for
+// that reason.
+vfs_can_enter :: proc(vfs: ^VFS, p: string, user: string) -> VFS_Error {
+	sync.mutex_lock(&vfs.lock)
+	defer sync.mutex_unlock(&vfs.lock)
+
+	entry, ok := vfs.entries[p]
+	if !ok {
+		return .Not_Found
+	}
+	if entry.type != .Directory {
+		return .Not_A_Directory
+	}
+	if !can_read_entry(entry, user) {
+		return .Not_Found
+	}
+	return .None
 }
 
 vfs_is_dir :: proc(vfs: ^VFS, p: string) -> bool {

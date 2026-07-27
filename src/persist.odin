@@ -1,11 +1,13 @@
 package main
 
+import "base:intrinsics"
 import "base:runtime"
 import "core:fmt"
 import "core:os"
 import "core:strconv"
 import "core:strings"
 import "core:sync"
+import "core:sys/posix"
 import "core:time"
 
 // ---------------------------------------------------------------------------
@@ -422,7 +424,53 @@ persist_save_if_dirty :: proc() {
 	}
 }
 
-// Periodically flushes dirty state.
+// ---------------------------------------------------------------------------
+// Shutdown
+//
+// Without this, `systemctl restart` threw away up to a full snapshot interval
+// of everything anyone had created — which, during a deploy, is exactly the
+// window in which people are told to reload the page.
+// ---------------------------------------------------------------------------
+
+@(private = "file")
+g_shutdown: bool
+
+// Signal handler. Sets a flag and returns, and does nothing else on purpose:
+// a handler runs on whatever thread was interrupted, so allocating, taking a
+// lock or writing a file here can deadlock against the very thread it
+// interrupted. All the real work happens in the worker below.
+@(private = "file")
+handle_shutdown_signal :: proc "c" (sig: posix.Signal) {
+	intrinsics.atomic_store(&g_shutdown, true)
+}
+
+install_signal_handlers :: proc() {
+	posix.signal(.SIGTERM, handle_shutdown_signal)
+	posix.signal(.SIGINT, handle_shutdown_signal)
+	posix.signal(.SIGHUP, handle_shutdown_signal)
+}
+
+// How often the worker wakes to check the shutdown flag. Short enough that a
+// restart is not visibly delayed, long enough to be free when idle.
+@(private = "file")
+SHUTDOWN_POLL :: 250 * time.Millisecond
+
+@(private = "file")
+shutdown_now :: proc() {
+	// Tell anyone still connected why their session is about to end, rather
+	// than dropping the socket and letting the page show "connection lost".
+	broadcast_notice("\x1b[33m*\x1b[0m server restarting, back in a moment\r\n", -1)
+
+	// Give the writer threads a chance to drain that notice before the process
+	// disappears underneath them.
+	time.sleep(200 * time.Millisecond)
+
+	persist_save_if_dirty()
+	fmt.println("shutdown: state flushed")
+	os.exit(0)
+}
+
+// Periodically flushes dirty state, and handles shutdown.
 //
 // Polling for a dirty flag rather than snapshotting on a timer means an idle
 // server does no disk I/O at all, and a busy one loses at most one interval of
@@ -430,9 +478,21 @@ persist_save_if_dirty :: proc() {
 persist_worker :: proc() {
 	defer runtime.default_temp_allocator_destroy(&runtime.global_default_temp_allocator_data)
 
+	since_snapshot := time.Duration(0)
+
 	for {
-		time.sleep(SNAPSHOT_INTERVAL)
+		time.sleep(SHUTDOWN_POLL)
 		free_all(context.temp_allocator)
-		persist_save_if_dirty()
+
+		if intrinsics.atomic_load(&g_shutdown) {
+			shutdown_now()
+			return
+		}
+
+		since_snapshot += SHUTDOWN_POLL
+		if since_snapshot >= SNAPSHOT_INTERVAL {
+			since_snapshot = 0
+			persist_save_if_dirty()
+		}
 	}
 }

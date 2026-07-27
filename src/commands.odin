@@ -240,11 +240,12 @@ cmd_pwd :: proc(ctx: ^Cmd_Ctx, args: []string) {
 }
 
 cmd_cd :: proc(ctx: ^Cmd_Ctx, args: []string) {
+	user := client_get_user(ctx.client, context.temp_allocator)
+
 	target: string
 	if len(args) == 0 {
 		// Bare `cd` goes home: the user's home directory if they have one,
 		// otherwise the shared scratch space.
-		user := client_get_user(ctx.client, context.temp_allocator)
 		if len(user) > 0 {
 			target = fmt.tprintf("/home/%s", user)
 		} else {
@@ -254,8 +255,8 @@ cmd_cd :: proc(ctx: ^Cmd_Ctx, args: []string) {
 		target = resolve_arg(ctx.client, args[0])
 	}
 
-	if !vfs_is_dir(&g_vfs, target) {
-		errf(ctx, "cd: %s: %s\n", args[0] if len(args) > 0 else target, vfs_error_string(.Not_Found))
+	if err := vfs_can_enter(&g_vfs, target, user); err != .None {
+		errf(ctx, "cd: %s: %s\n", args[0] if len(args) > 0 else target, vfs_error_string(err))
 		return
 	}
 
@@ -399,7 +400,7 @@ cmd_mkdir :: proc(ctx: ^Cmd_Ctx, args: []string) {
 			errf(ctx, "mkdir: %s: %s\n", t, vfs_error_string(err))
 			continue
 		}
-		announce(ctx.client, fmt.tprintf("created directory %s", abs))
+		announce_fs(ctx.client, "created directory", abs)
 	}
 }
 
@@ -416,7 +417,7 @@ cmd_rmdir :: proc(ctx: ^Cmd_Ctx, args: []string) {
 			errf(ctx, "rmdir: %s: %s\n", t, vfs_error_string(err))
 			continue
 		}
-		announce(ctx.client, fmt.tprintf("removed directory %s", abs))
+		announce_fs(ctx.client, "removed directory", abs)
 	}
 }
 
@@ -452,13 +453,13 @@ cmd_rm :: proc(ctx: ^Cmd_Ctx, args: []string) {
 				errf(ctx, "rm: %s: %s\n", t, vfs_error_string(err))
 				continue
 			}
-			announce(ctx.client, fmt.tprintf("removed %s (%d entries)", abs, n))
+			announce_fs(ctx.client, fmt.tprintf("removed %d entries under", n), abs)
 		} else {
 			if err := vfs_rm(&g_vfs, abs, user); err != .None {
 				errf(ctx, "rm: %s: %s\n", t, vfs_error_string(err))
 				continue
 			}
-			announce(ctx.client, fmt.tprintf("removed %s", abs))
+			announce_fs(ctx.client, "removed", abs)
 		}
 	}
 }
@@ -890,22 +891,44 @@ parse_positive_int :: proc(s: string) -> (val: int, ok: bool) {
 
 // Announces a filesystem change to everyone else.
 //
-// The old code broadcast one of these for every mkdir/rm/echo with no rate
-// limit at all, so a loop of `mkdir` was also a way to spam every connected
-// terminal. Now it is bounded by the same broadcast budget as `wall`, and
-// silently skipped rather than refused when the budget is gone.
-announce :: proc(c: ^Client, action: string) {
+// Two separate limits apply. The old code broadcast one of these for every
+// mkdir/rm/echo with no rate limit at all, so a loop of `mkdir` was a way to
+// spam every connected terminal; it is now bounded by the same broadcast budget
+// as `wall`, and silently skipped rather than refused when the budget is gone.
+//
+// More importantly, it broadcast the *absolute path*. Creating
+// /home/alice/private-notes told every connected session that the path existed,
+// which defeats the entire point of the permission model — the listing was
+// hidden but the announcement was not. Only the shared areas are announced now.
+announce_fs :: proc(c: ^Client, verb: string, abs_path: string) {
+	if !is_shared_path(abs_path) {
+		return
+	}
 	if !rate_allow(&c.rl_broadcast) {
 		return
 	}
 
 	name := client_get_name(c, context.temp_allocator)
-	safe := sanitize_text(action, 200, context.temp_allocator)
+	safe := sanitize_text(abs_path, 200, context.temp_allocator)
 
 	broadcast_notice(
-		fmt.tprintf("\x1b[33m[system]\x1b[0m %s %s\r\n", name, safe),
+		fmt.tprintf("\x1b[33m[system]\x1b[0m %s %s %s\r\n", name, verb, safe),
 		c.id,
 	)
+}
+
+// The world-writable areas, which are the only paths whose existence is not
+// information about a particular user.
+is_shared_path :: proc(p: string) -> bool {
+	for root in ([?]string{"/tmp", "/pub"}) {
+		if p == root {
+			return true
+		}
+		if strings.has_prefix(p, root) && len(p) > len(root) && p[len(root)] == '/' {
+			return true
+		}
+	}
+	return false
 }
 
 format_timestamp :: proc(unix_seconds: i64) -> string {

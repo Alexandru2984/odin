@@ -212,14 +212,16 @@ edit_insert :: proc(c: ^Client, ch: byte) {
 	}
 
 	at_end := c.cursor == len(c.line)
+	secret := c.echo_off
 	inject(&c.line, c.cursor, ch)
 	c.cursor += 1
 
 	if at_end {
 		// Fast path: appending only needs the character echoed, which keeps
 		// typing responsive on a slow link instead of repainting every key.
+		// While collecting a secret the echo is a mask, never the character.
 		sync.mutex_unlock(&c.state_lock)
-		client_send(c, string([]byte{ch}))
+		client_send(c, secret ? "*" : string([]byte{ch}))
 		return
 	}
 
@@ -373,6 +375,16 @@ edit_kill_word :: proc(c: ^Client) {
 
 @(private = "file")
 edit_cancel :: proc(c: ^Client) {
+	// Ctrl-C during a password prompt abandons the whole sequence rather than
+	// just clearing the line, otherwise the session is left masked with no
+	// obvious way out.
+	if ask_active(c) {
+		ask_clear(c)
+		client_send(c, "^C\r\n")
+		client_send_prompt(c)
+		return
+	}
+
 	sync.mutex_lock(&c.state_lock)
 	clear(&c.line)
 	c.cursor = 0
@@ -439,12 +451,19 @@ history_add :: proc(c: ^Client, line: string) {
 	if len(strings.trim_space(line)) == 0 {
 		return
 	}
+
+	// `login alice hunter2` must not be recallable with the Up arrow, nor
+	// printable by `history`. What gets stored is the command and the username
+	// with the credential replaced.
+	entry := redact_for_history(line)
+
 	// Skip consecutive duplicates, like a shell's HISTCONTROL=ignoredups.
-	if len(c.history) > 0 && c.history[len(c.history) - 1] == line {
+	if len(c.history) > 0 && c.history[len(c.history) - 1] == entry {
+		delete(entry)
 		return
 	}
 
-	append(&c.history, strings.clone(line))
+	append(&c.history, entry)
 
 	if len(c.history) > MAX_HISTORY {
 		delete(c.history[0])
@@ -466,6 +485,18 @@ submit_line :: proc(c: ^Client) {
 	clear(&c.line)
 	c.cursor = 0
 	sync.mutex_unlock(&c.state_lock)
+
+	// A masked line must not be echoed back by the newline, and the answer to a
+	// prompt is not a command: it goes to whoever asked, never to history or to
+	// the interpreter.
+	if ask_active(c) {
+		client_send(c, "\r\n")
+		ask_feed(c, line)
+		if !client_is_dead(c) {
+			client_send_prompt(c)
+		}
+		return
+	}
 
 	client_send(c, "\r\n")
 

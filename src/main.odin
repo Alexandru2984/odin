@@ -36,10 +36,12 @@ g_started_at: time.Time
 main :: proc() {
 	g_started_at = time.now()
 	config_load_env()
+	install_signal_handlers()
 
 	vfs_init(&g_vfs)
 	auth_init(&g_users)
 	conn_tracker_init(&g_conns)
+	abuse_init()
 	g_clients = make([dynamic]^Client)
 
 	// Restore the previous session's state, if any.
@@ -168,7 +170,8 @@ handle_connection :: proc(socket: net.TCP_Socket, peer: net.Endpoint) {
 	}
 	defer http_request_destroy(&req)
 
-	if req.method != "GET" && req.method != "HEAD" {
+	head_only := req.method == "HEAD"
+	if req.method != "GET" && !head_only {
 		http_send_status(socket, 405, "Method Not Allowed")
 		return
 	}
@@ -185,27 +188,44 @@ handle_connection :: proc(socket: net.TCP_Socket, peer: net.Endpoint) {
 	}
 
 	if route == "/healthz" {
-		body := fmt.tprintf("ok %d/%d\n", client_count(), MAX_CLIENTS)
+		// Deliberately says nothing about who is connected or how busy the
+		// service is: this endpoint is reachable from the internet, and session
+		// counts are free reconnaissance for anyone deciding whether an attack
+		// is working.
 		http_send_response(
 			socket,
 			200,
 			"OK",
 			"text/plain; charset=utf-8",
-			transmute([]byte)body,
+			transmute([]byte)string("ok\n"),
+			head_only = head_only,
 		)
 		return
 	}
 
-	http_serve_static(socket, req.target)
+	http_serve_static(socket, req.target, head_only)
 }
 
 // Determines the real client address.
 //
-// The listener is bound to loopback and nginx is the only thing that can reach
-// it, so the proxy's headers are trustworthy here. If that ever stops being
-// true this is the line that has to change.
+// Proxy headers are believed only when the connection genuinely arrived from
+// loopback, which is the only place nginx can be.
+//
+// Trusting them unconditionally is a rate-limit bypass: every limit in the
+// server — per-IP connection count, and by extension the auth and broadcast
+// budgets attached to a session — is keyed on this string. Anything able to
+// reach the socket directly could send `X-Real-IP: <anything>` and have the
+// limits applied to an address it invented, spending a fresh budget on every
+// connection while the real source was never counted. Binding to loopback
+// makes that unreachable today; this makes it safe regardless.
 client_address :: proc(peer: net.Endpoint, req: ^HTTP_Request) -> string {
-	if xri := http_header(req, "x-real-ip"); len(xri) > 0 && len(xri) <= 64 {
+	direct := net.address_to_string(peer.address, context.temp_allocator)
+
+	if !is_loopback_address(peer.address) {
+		return direct
+	}
+
+	if xri := http_header(req, "x-real-ip"); is_plausible_address(xri) {
 		return strings.clone(xri, context.temp_allocator)
 	}
 	if xff := http_header(req, "x-forwarded-for"); len(xff) > 0 {
@@ -215,30 +235,80 @@ client_address :: proc(peer: net.Endpoint, req: ^HTTP_Request) -> string {
 			first = xff[:comma]
 		}
 		first = strings.trim_space(first)
-		if len(first) > 0 && len(first) <= 64 {
+		if is_plausible_address(first) {
 			return strings.clone(first, context.temp_allocator)
 		}
 	}
-	return net.address_to_string(peer.address, context.temp_allocator)
+	return direct
+}
+
+@(private = "file")
+is_loopback_address :: proc(addr: net.Address) -> bool {
+	switch a in addr {
+	case net.IP4_Address:
+		return a[0] == 127
+	case net.IP6_Address:
+		// ::1
+		for i in 0 ..< 7 {
+			if a[i] != 0 {
+				return false
+			}
+		}
+		return a[7] == 1
+	}
+	return false
+}
+
+// A header value is only accepted as an address if it *looks* like one.
+//
+// The value becomes a map key and is compared against other addresses, so
+// letting arbitrary header text through would let one client occupy unbounded
+// distinct keys in the connection tracker.
+@(private = "file")
+is_plausible_address :: proc(s: string) -> bool {
+	// Longest legal textual form is an IPv4-mapped IPv6 address.
+	if len(s) == 0 || len(s) > 45 {
+		return false
+	}
+	for i in 0 ..< len(s) {
+		c := s[i]
+		is_hex := (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+		if !is_hex && c != '.' && c != ':' {
+			return false
+		}
+	}
+	return true
 }
 
 handle_ws_request :: proc(socket: net.TCP_Socket, peer: net.Endpoint, req: ^HTTP_Request) {
-	ip := client_address(peer, req)
+	// This must be a heap allocation, not a temp one.
+	//
+	// client_address returns temp-allocated memory, but `ip` has to stay valid
+	// until conn_release runs at the end of this procedure — and in between,
+	// terminal_loop calls free_all(context.temp_allocator) once per command.
+	// Holding the temp string meant conn_release looked up a key made of
+	// recycled bytes: the per-IP counter was never decremented, so after
+	// MAX_CONNS_PER_IP sessions that address was refused until the process
+	// restarted, and a collision would corrupt an unrelated address's count.
+	ip := strings.clone(client_address(peer, req))
+	defer delete(ip)
 
 	// Terminal session slots are a scarcer resource than page loads.
 	if client_count() >= MAX_CLIENTS {
+		log_abuse("server_full", ip)
 		http_send_status(socket, 503, "Service Unavailable")
 		return
 	}
 
 	// Per-IP concurrency, enforced here rather than trusting nginx alone.
 	if !conn_acquire(&g_conns, ip) {
+		log_abuse("per_ip_limit", ip)
 		http_send_status(socket, 429, "Too Many Requests")
 		return
 	}
 	defer conn_release(&g_conns, ip)
 
-	if !ws_handshake(socket, req) {
+	if !ws_handshake(socket, req, ip) {
 		return
 	}
 
@@ -330,12 +400,11 @@ terminal_loop :: proc(client: ^Client, conn: ^WS_Conn) {
 		switch err {
 		case .None:
 			missed_pongs = 0
-			client.last_activity = time.now()
+			client_touch(client)
 
 		case .Timeout:
 			// No data this interval. Decide between a keepalive and a hangup.
-			idle := time.diff(client.last_activity, time.now())
-			if idle > IDLE_TIMEOUT {
+			if client_idle(client) > IDLE_TIMEOUT {
 				client_close(client, .Going_Away, "idle timeout")
 				return
 			}

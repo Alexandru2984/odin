@@ -127,6 +127,10 @@ http_parse_head :: proc(head: string) -> (req: HTTP_Request, ok: bool) {
 // Responses
 // ---------------------------------------------------------------------------
 
+// `head_only` suppresses the body while keeping every header identical, which
+// is what a HEAD response is required to be. Sending a body anyway leaves
+// unread bytes on a connection the client considers finished; nginx treats that
+// as an upstream protocol error and turns a valid HEAD into a 502.
 http_send_response :: proc(
 	socket: net.TCP_Socket,
 	status: int,
@@ -134,6 +138,7 @@ http_send_response :: proc(
 	content_type: string,
 	body: []byte,
 	extra_headers: string = "",
+	head_only: bool = false,
 ) {
 	head := fmt.tprintf(
 		"HTTP/1.1 %d %s\r\n" +
@@ -151,14 +156,26 @@ http_send_response :: proc(
 	)
 
 	send_all(socket, transmute([]byte)head)
-	if len(body) > 0 {
+	if len(body) > 0 && !head_only {
 		send_all(socket, body)
 	}
 }
 
-http_send_status :: proc(socket: net.TCP_Socket, status: int, status_text: string) {
+http_send_status :: proc(
+	socket: net.TCP_Socket,
+	status: int,
+	status_text: string,
+	head_only: bool = false,
+) {
 	body := fmt.tprintf("%d %s\n", status, status_text)
-	http_send_response(socket, status, status_text, "text/plain; charset=utf-8", transmute([]byte)body)
+	http_send_response(
+		socket,
+		status,
+		status_text,
+		"text/plain; charset=utf-8",
+		transmute([]byte)body,
+		head_only = head_only,
+	)
 }
 
 // ---------------------------------------------------------------------------
@@ -304,16 +321,16 @@ resolve_static_path :: proc(target: string, allocator := context.temp_allocator)
 	return strings.concatenate({PUBLIC_DIR, cleaned}, allocator), true
 }
 
-http_serve_static :: proc(socket: net.TCP_Socket, target: string) {
+http_serve_static :: proc(socket: net.TCP_Socket, target: string, head_only: bool = false) {
 	file_path, ok := resolve_static_path(target)
 	if !ok {
-		http_send_status(socket, 400, "Bad Request")
+		http_send_status(socket, 400, "Bad Request", head_only)
 		return
 	}
 
 	data, err := os.read_entire_file(file_path, context.temp_allocator)
 	if err != nil {
-		http_send_status(socket, 404, "Not Found")
+		http_send_status(socket, 404, "Not Found", head_only)
 		return
 	}
 
@@ -325,7 +342,7 @@ http_serve_static :: proc(socket: net.TCP_Socket, target: string) {
 		cache = "Cache-Control: public, max-age=3600\r\n"
 	}
 
-	http_send_response(socket, 200, "OK", mime_type(file_path), data, cache)
+	http_send_response(socket, 200, "OK", mime_type(file_path), data, cache, head_only)
 }
 
 // ---------------------------------------------------------------------------
@@ -365,7 +382,7 @@ origin_allowed :: proc(origin: string) -> bool {
 
 // Performs the RFC 6455 opening handshake. Returns false if the request is not
 // a valid or permitted upgrade, having already sent an error response.
-ws_handshake :: proc(socket: net.TCP_Socket, req: ^HTTP_Request) -> bool {
+ws_handshake :: proc(socket: net.TCP_Socket, req: ^HTTP_Request, ip: string) -> bool {
 	if !strings.contains(
 		strings.to_lower(http_header(req, "upgrade"), context.temp_allocator),
 		"websocket",
@@ -376,6 +393,10 @@ ws_handshake :: proc(socket: net.TCP_Socket, req: ^HTTP_Request) -> bool {
 
 	origin := http_header(req, "origin")
 	if !origin_allowed(origin) {
+		// Worth a real log line rather than a counter: a rejected origin means
+		// some other site tried to open a socket here using a visitor's
+		// browser, and knowing which site that was is the entire value.
+		log_reject("origin_denied", ip, origin)
 		http_send_status(socket, 403, "Forbidden")
 		return false
 	}

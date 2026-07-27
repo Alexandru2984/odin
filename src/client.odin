@@ -59,10 +59,23 @@ Client :: struct {
 	line:   [dynamic]byte,
 	cursor: int,
 
+	// Set while a command is collecting a value rather than a command line.
+	// Both are read by the redraw path, so they belong with the line state:
+	// a broadcast arriving mid-password must redraw the masked line and the
+	// "Password:" label, not the shell prompt and the plain text.
+	echo_off:     bool,
+	prompt_label: string, // owned; "" means the normal shell prompt
+
 	// --- Reader-thread-private state ----------------------------------------
 	history:    [dynamic]string,
 	hist_pos:   int,
 	saved_line: string, // owned, line stashed while browsing history
+
+	// Which value an interactive prompt is waiting for, and what it has
+	// collected so far. Wiped by ask_clear rather than simply freed.
+	ask_state: Ask_State,
+	ask_user:  string, // owned
+	ask_pass:  string, // owned
 
 	// Partial ANSI escape sequence. Terminals emit these as several bytes and
 	// a WebSocket message can split them anywhere, so the state machine has to
@@ -111,6 +124,10 @@ client_init :: proc(c: ^Client, socket: net.TCP_Socket, id: int, ip: string) {
 }
 
 client_destroy :: proc(c: ^Client) {
+	// Credentials in flight are wiped, not just released.
+	secure_delete(c.ask_user)
+	secure_delete(c.ask_pass)
+
 	delete(c.ip)
 	delete(c.out)
 	delete(c.line)
@@ -119,6 +136,7 @@ client_destroy :: proc(c: ^Client) {
 	delete(c.cwd)
 	delete(c.user)
 	delete(c.saved_line)
+	delete(c.prompt_label)
 
 	for h in c.history {
 		delete(h)
@@ -306,6 +324,22 @@ client_set_color :: proc(c: ^Client, code: string) {
 	delete(old)
 }
 
+// last_activity is written by the reader thread and read by `who` on another
+// thread, so it needs the same lock as the rest of the shared session state.
+// An unsynchronised i64 write next to a concurrent read is a data race whatever
+// the odds of observing a torn value are.
+client_touch :: proc(c: ^Client) {
+	sync.mutex_lock(&c.state_lock)
+	defer sync.mutex_unlock(&c.state_lock)
+	c.last_activity = time.now()
+}
+
+client_idle :: proc(c: ^Client) -> time.Duration {
+	sync.mutex_lock(&c.state_lock)
+	defer sync.mutex_unlock(&c.state_lock)
+	return time.diff(c.last_activity, time.now())
+}
+
 client_set_user :: proc(c: ^Client, user: string) {
 	sync.mutex_lock(&c.state_lock)
 	defer sync.mutex_unlock(&c.state_lock)
@@ -320,6 +354,11 @@ client_set_user :: proc(c: ^Client, user: string) {
 
 // Builds the prompt string. Assumes state_lock is already held.
 client_prompt_locked :: proc(c: ^Client, allocator := context.temp_allocator) -> string {
+	// A command collecting a value owns the prompt while it does so.
+	if len(c.prompt_label) > 0 {
+		return strings.clone(c.prompt_label, allocator)
+	}
+
 	marker := "$"
 	if len(c.user) > 0 {
 		marker = "%"
@@ -357,7 +396,17 @@ client_redraw_string_locked :: proc(c: ^Client, allocator := context.temp_alloca
 
 	strings.write_string(&b, "\r\x1b[2K") // column 0, erase whole line
 	strings.write_string(&b, client_prompt_locked(c, allocator))
-	strings.write_string(&b, string(c.line[:]))
+
+	if c.echo_off {
+		// A password is echoed as its own length and nothing more. Rendering it
+		// here rather than at the point of entry means the masking survives a
+		// redraw triggered by someone else's broadcast.
+		for _ in 0 ..< len(c.line) {
+			strings.write_byte(&b, '*')
+		}
+	} else {
+		strings.write_string(&b, string(c.line[:]))
+	}
 
 	// Move the cursor back to where the user actually is.
 	if back := len(c.line) - c.cursor; back > 0 {
