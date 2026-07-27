@@ -1,7 +1,6 @@
 package main
 
 import "core:testing"
-import "core:fmt"
 
 @(test)
 test_vfs_basic :: proc(t: ^testing.T) {

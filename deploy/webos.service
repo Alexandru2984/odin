@@ -1,0 +1,64 @@
+[Unit]
+Description=WebOS Odin Server
+Documentation=https://odin.micutu.com
+After=network-online.target
+Wants=network-online.target
+
+# Don't spin forever on a crash loop; give up after 5 failures in 60s so the
+# failure is visible in `systemctl status` instead of silently thrashing.
+# (These are [Unit] keys — systemd ignores them under [Service].)
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=micu
+Group=micu
+WorkingDirectory=/home/micu/webos
+ExecStart=/home/micu/webos/bin/webos_server
+Restart=always
+RestartSec=3
+
+# --- Resource limits -------------------------------------------------------
+# The service previously grew to 719M RSS + 213M swap from leaked allocations.
+# These caps mean a future leak or a memory-exhaustion DoS kills the service
+# instead of the whole VPS.
+MemoryHigh=384M
+MemoryMax=512M
+TasksMax=512
+LimitNOFILE=8192
+
+# --- Sandboxing ------------------------------------------------------------
+# The process needs: TCP sockets, read access to its own directory, and write
+# access to data/ for VFS snapshots. Nothing else.
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/micu/webos/data
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallFilter=@system-service
+# NB: @resources is deliberately NOT denied. Odin's thread.create sets thread
+# scheduling attributes, and blocking those kills the process with SIGSYS on
+# the first client connection (status=31/SYS).
+SystemCallFilter=~@privileged @obsolete
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

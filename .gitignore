@@ -2,7 +2,11 @@
 *.bin
 *.exe
 webos_server
+bin/
 out/
+
+# Runtime state (VFS snapshots, user database)
+data/
 
 # C/C++ / Odin temporary files
 *.o
