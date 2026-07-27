@@ -55,6 +55,8 @@ COMMANDS := [?]Command {
 
 	// --- Text ---------------------------------------------------------------
 	{"cat", CAT_TEXT, "cat <file...>", "Print file contents.", cmd_cat},
+	{"edit", CAT_TEXT, "edit <file>", "Open a file in the full-screen editor.", cmd_edit},
+	{"less", CAT_TEXT, "less [file...]", "Page through text a screen at a time.", cmd_less},
 	{"echo", CAT_TEXT, "echo <text>", "Print text. Combine with > or >> to write a file.", cmd_echo},
 	{"grep", CAT_TEXT, "grep <pattern> <file...>", "Print lines matching a pattern.", cmd_grep},
 	{"head", CAT_TEXT, "head [-n N] <file>", "Print the first N lines (default 10).", cmd_head},
@@ -94,6 +96,7 @@ COMMANDS := [?]Command {
 	{"msg", CAT_SOCIAL, "msg <user> <message>", "Send a private message to one user.", cmd_msg},
 	{"me", CAT_SOCIAL, "me <action>", "Broadcast an action, IRC style.", cmd_me},
 	{"bell", CAT_SOCIAL, "bell [user]", "Flash a terminal to get someone's attention.", cmd_bell},
+	{"mail", CAT_SOCIAL, "mail [send|read|clear]", "Leave messages for users who are offline.", cmd_mail},
 
 	// --- System -------------------------------------------------------------
 	{"help", CAT_SYS, "help [command|category]", "Show this help, or help for one command.", cmd_help},
@@ -110,6 +113,9 @@ COMMANDS := [?]Command {
 	{"export", CAT_SYS, "export NAME=value", "Set a session variable.", cmd_export},
 	{"unset", CAT_SYS, "unset <name...>", "Remove a session variable.", cmd_unset},
 	{"dmesg", CAT_SYS, "dmesg", "Show recent request rejections.", cmd_dmesg},
+	{"alias", CAT_SYS, "alias name=command", "Give a command a shorter name.", cmd_alias},
+	{"unalias", CAT_SYS, "unalias <name...>", "Remove an alias.", cmd_unalias},
+	{"cal", CAT_SYS, "cal [month] [year]", "Print a calendar.", cmd_cal},
 	{"version", CAT_SYS, "version", "Show version and build information.", cmd_version},
 	{"neofetch", CAT_SYS, "neofetch", "Show system information with art.", cmd_neofetch},
 	{"theme", CAT_SYS, "theme <name>", "Change your terminal's colour scheme.", cmd_theme},

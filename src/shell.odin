@@ -648,22 +648,44 @@ run_stage :: proc(c: ^Client, ctx: ^Cmd_Ctx, args: []string) -> bool {
 		return true
 	}
 
-	name := strings.to_lower(args[0], context.temp_allocator)
+	effective := args
 
-	// A session alias shadows nothing built in, so a user cannot redefine `rm`
-	// into something surprising for themselves and then forget.
+	// Session aliases are expanded exactly once, and only in the command
+	// position. Expanding repeatedly would let `alias a=b` and `alias b=a` loop
+	// forever, and expanding arguments would mean a variable holding an alias
+	// name silently became a different command.
+	if body, aliased := c.aliases[args[0]]; aliased {
+		expanded := make([dynamic]string, context.temp_allocator)
+
+		for word in split_args(body, context.temp_allocator) {
+			append(&expanded, word)
+		}
+		for extra in args[1:] {
+			append(&expanded, extra)
+		}
+
+		if len(expanded) == 0 {
+			return true
+		}
+		effective = expanded[:]
+	}
+
+	name := strings.to_lower(effective[0], context.temp_allocator)
+
+	// An alias can never shadow a built-in — cmd_alias refuses those names — so
+	// a user cannot redefine `rm` into something surprising and then forget.
 	command, found := find_command(name)
 	if !found {
 		client_sendf(
 			c,
 			"\x1b[31m%s: command not found\x1b[0m%s\r\n",
-			sanitize_text(args[0], 32, context.temp_allocator),
+			sanitize_text(effective[0], 32, context.temp_allocator),
 			format_suggestions(name),
 		)
 		return false
 	}
 
-	command.handler(ctx, args[1:])
+	command.handler(ctx, effective[1:])
 	return true
 }
 

@@ -81,7 +81,12 @@ Client :: struct {
 	// only by the reader thread, which is the only thread that runs commands,
 	// so they need no lock.
 	vars:        map[string]string, // owned keys and values
+	aliases:     map[string]string, // owned keys and values
 	last_status: int,
+
+	// The full-screen editor, when one is open. Reader-thread private: only
+	// the thread running commands ever touches it.
+	editor: Editor,
 
 	// Which value an interactive prompt is waiting for, and what it has
 	// collected so far. Wiped by ask_clear rather than simply freed.
@@ -120,6 +125,7 @@ client_init :: proc(c: ^Client, socket: net.TCP_Socket, id: int, ip: string) {
 	c.history = make([dynamic]string, 0, 16)
 	c.hist_pos = -1
 	c.vars = make(map[string]string)
+	c.aliases = make(map[string]string)
 
 	// Assume a conventional terminal until the client says otherwise, so the
 	// welcome banner is laid out sensibly even before the first size report.
@@ -142,6 +148,8 @@ client_init :: proc(c: ^Client, socket: net.TCP_Socket, id: int, ip: string) {
 }
 
 client_destroy :: proc(c: ^Client) {
+	editor_destroy(&c.editor)
+
 	// Credentials in flight are wiped, not just released.
 	secure_delete(c.ask_user)
 	secure_delete(c.ask_pass)
@@ -166,6 +174,12 @@ client_destroy :: proc(c: ^Client) {
 		delete(value)
 	}
 	delete(c.vars)
+
+	for key, value in c.aliases {
+		delete(key)
+		delete(value)
+	}
+	delete(c.aliases)
 }
 
 // ---------------------------------------------------------------------------

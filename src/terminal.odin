@@ -36,6 +36,14 @@ KEY_ESC :: 0x1B
 KEY_BACKSPACE :: 0x7F
 
 handle_input :: proc(c: ^Client, data: string) {
+	// A full-screen editor owns the whole screen and the whole keyboard while
+	// it is open, including the escape sequences the line editor would
+	// otherwise interpret.
+	if editor_active(c) {
+		editor_input(c, data)
+		return
+	}
+
 	for i in 0 ..< len(data) {
 		ch := data[i]
 

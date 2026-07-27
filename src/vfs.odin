@@ -430,6 +430,57 @@ vfs_mkdir_direct :: proc(p: string, user: string) -> VFS_Error {
 	return .None
 }
 
+// Writes a file owned by `owner`, bypassing the parent's write check.
+//
+// Mail delivery needs to place a message inside the recipient's home, which is
+// theirs and not the sender's. The file is created owned by the recipient, so
+// the sender cannot afterwards edit or delete what they sent. Like
+// vfs_mkdir_direct this is reachable only from code that constructs the path
+// itself — never from a user-supplied one.
+vfs_write_as_owner :: proc(p: string, content: string, owner: string) -> VFS_Error {
+	vfs := &g_vfs
+
+	if err := vfs_validate_path(p); err != .None {
+		return err
+	}
+	if len(content) > VFS_MAX_FILE_SIZE {
+		return .File_Too_Large
+	}
+
+	sync.mutex_lock(&vfs.lock)
+	defer sync.mutex_unlock(&vfs.lock)
+
+	parent := path.dir(p, context.temp_allocator)
+	parent_entry, parent_ok := vfs.entries[parent]
+	if !parent_ok || parent_entry.type != .Directory {
+		return .Not_Found
+	}
+	if p in vfs.entries {
+		return .Already_Exists
+	}
+	if err := check_new_entry_locked(vfs, owner); err != .None {
+		return err
+	}
+	if vfs.total_bytes + len(content) > VFS_MAX_TOTAL_BYTES {
+		return .Quota_Bytes
+	}
+
+	now := unix_now()
+	vfs.entries[strings.clone(p)] = VFS_Entry {
+		type     = .File,
+		content  = strings.clone(content),
+		owner    = strings.clone(owner),
+		perm     = .Private, // a mailbox is nobody else's business
+		created  = now,
+		modified = now,
+	}
+	vfs.total_bytes += len(content)
+	user_count_add(vfs, owner, 1)
+	vfs.dirty = true
+
+	return .None
+}
+
 // Creates a directory and any missing parents, like `mkdir -p`.
 vfs_mkdir_all :: proc(vfs: ^VFS, p: string, user: string) -> VFS_Error {
 	if err := vfs_validate_path(p); err != .None {
