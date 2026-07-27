@@ -260,6 +260,21 @@ unquote :: proc(s: string) -> string {
 	return s
 }
 
+// Renders an integer right-aligned in `width` columns, padded with spaces.
+//
+// Odin's fmt pads a numeric width with zeros — "%6d" turns 42 into "000042",
+// and "%-6d" into "420000". Every aligned column in this program is a number,
+// so anything that needs to line up goes through here and is formatted as a
+// string, which pads the way a terminal expects.
+pad_int :: proc(n: int, width: int, allocator := context.temp_allocator) -> string {
+	return fmt.aprintf("%*s", width, fmt.tprintf("%d", n), allocator = allocator)
+}
+
+// Left-aligned counterpart, for the leading column of a table.
+pad_int_left :: proc(n: int, width: int, allocator := context.temp_allocator) -> string {
+	return fmt.aprintf("%-*s", width, fmt.tprintf("%d", n), allocator = allocator)
+}
+
 // Joins a directory and a file name with a single separator.
 concat_path :: proc(dir: string, name: string, allocator := context.allocator) -> string {
 	if len(dir) == 0 {

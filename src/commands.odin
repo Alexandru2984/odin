@@ -17,9 +17,16 @@ import "core:sync"
 
 Cmd_Ctx :: struct {
 	client:  ^Client,
-	capture: ^strings.Builder, // non-nil while redirecting to a file
+	capture: ^strings.Builder, // non-nil when output feeds a pipe or a file
+	// Output of the previous pipeline stage. Commands that take a file
+	// argument read this instead when none is given, which is what makes
+	// `cat x | grep y` behave the way anyone would expect.
+	stdin:   string,
 	lines:   int,
 	truncated: bool,
+	// 0 means success. `&&` and `||` are built on this, and errf sets it, so
+	// any command that reports an error automatically breaks a chain.
+	status:  int,
 }
 
 // Writes command output. Newlines are normalised to CRLF for the terminal but
@@ -53,7 +60,12 @@ outf :: proc(ctx: ^Cmd_Ctx, format: string, args: ..any) {
 }
 
 // Error output, coloured red for the terminal.
+//
+// Also marks the command as failed: every error path in every command already
+// goes through here, so `a && b` and `a || b` work without each command having
+// to remember to set a status.
 errf :: proc(ctx: ^Cmd_Ctx, format: string, args: ..any) {
+	ctx.status = 1
 	if ctx.capture != nil {
 		out(ctx, fmt.tprintf(format, ..args))
 		return
@@ -67,114 +79,6 @@ Command :: struct {
 	usage:    string,
 	help:     string,
 	handler:  proc(ctx: ^Cmd_Ctx, args: []string),
-}
-
-// ---------------------------------------------------------------------------
-// Entry point
-// ---------------------------------------------------------------------------
-
-execute_command :: proc(c: ^Client, line: string) {
-	args := split_args(line, context.temp_allocator)
-	if len(args) == 0 {
-		return
-	}
-
-	// Split off a trailing redirection before the command sees its arguments.
-	redirect_path := ""
-	redirect_append := false
-	cmd_args, ok := extract_redirect(args[:], &redirect_path, &redirect_append)
-	if !ok {
-		client_send(c, "\x1b[31msyntax error: expected a file name after '>'\x1b[0m\r\n")
-		return
-	}
-	if len(cmd_args) == 0 {
-		return
-	}
-
-	name := strings.to_lower(cmd_args[0], context.temp_allocator)
-
-	command, found := find_command(name)
-	if !found {
-		client_sendf(
-			c,
-			"\x1b[31m%s: command not found\x1b[0m%s\r\n",
-			sanitize_text(cmd_args[0], 32, context.temp_allocator),
-			format_suggestions(name),
-		)
-		return
-	}
-
-	ctx := Cmd_Ctx {
-		client = c,
-	}
-
-	builder: strings.Builder
-	if len(redirect_path) > 0 {
-		if !rate_allow(&c.rl_write) {
-			client_send(c, "\x1b[31mwriting too fast, slow down\x1b[0m\r\n")
-			return
-		}
-		builder = strings.builder_make(context.temp_allocator)
-		ctx.capture = &builder
-	}
-
-	command.handler(&ctx, cmd_args[1:])
-
-	if len(redirect_path) > 0 {
-		finish_redirect(c, &ctx, redirect_path, redirect_append)
-	}
-}
-
-// Pulls a trailing `> file` / `>> file` off the argument list.
-@(private = "file")
-extract_redirect :: proc(
-	args: []string,
-	out_path: ^string,
-	out_append: ^bool,
-) -> (remaining: []string, ok: bool) {
-	for i in 0 ..< len(args) {
-		arg := args[i]
-		if len(arg) == 0 || arg[0] != '>' {
-			continue
-		}
-
-		is_append := strings.has_prefix(arg, ">>")
-		marker_len := is_append ? 2 : 1
-
-		target := arg[marker_len:]
-		if len(target) == 0 {
-			// The filename is the next token.
-			if i + 1 >= len(args) {
-				return nil, false
-			}
-			target = args[i + 1]
-		}
-
-		out_path^ = target
-		out_append^ = is_append
-		return args[:i], true
-	}
-	return args, true
-}
-
-@(private = "file")
-finish_redirect :: proc(c: ^Client, ctx: ^Cmd_Ctx, target: string, append_mode: bool) {
-	cwd := client_get_cwd(c, context.temp_allocator)
-	user := client_get_user(c, context.temp_allocator)
-	abs := vfs_resolve_path(cwd, unquote(target), context.temp_allocator)
-
-	content := strings.to_string(ctx.capture^)
-
-	err: VFS_Error
-	if append_mode {
-		err = vfs_append(&g_vfs, abs, content, user)
-	} else {
-		err = vfs_write(&g_vfs, abs, content, user)
-	}
-
-	if err != .None {
-		client_sendf(c, "\x1b[31m%s: %s\x1b[0m\r\n", target, vfs_error_string(err))
-	}
 }
 
 find_command :: proc(name: string) -> (cmd: Command, found: bool) {
@@ -218,6 +122,56 @@ ALIASES := [?]Alias {
 // ---------------------------------------------------------------------------
 // Shared helpers
 // ---------------------------------------------------------------------------
+
+// Gathers the text a filter should operate on: the contents of the named
+// files, or the piped input when no file is named.
+//
+// This is what makes a command usable on both sides of a pipe. `wc file` and
+// `cat file | wc` are the same operation and should not be two code paths.
+gather_input :: proc(
+	ctx: ^Cmd_Ctx,
+	name: string,
+	files: []string,
+) -> (content: string, ok: bool) {
+	if len(files) == 0 {
+		if len(ctx.stdin) == 0 {
+			errf(ctx, "%s: no input (name a file, or pipe something in)\n", name)
+			return "", false
+		}
+		return ctx.stdin, true
+	}
+
+	user := client_get_user(ctx.client, context.temp_allocator)
+	b := strings.builder_make(context.temp_allocator)
+	any_read := false
+
+	for f in files {
+		abs := resolve_arg(ctx.client, f)
+		text, read_ok := vfs_read(&g_vfs, abs, user, context.temp_allocator)
+		if !read_ok {
+			if vfs_is_dir(&g_vfs, abs) {
+				errf(ctx, "%s: %s: %s\n", name, f, vfs_error_string(.Is_A_Directory))
+			} else {
+				errf(ctx, "%s: %s: %s\n", name, f, vfs_error_string(.Not_Found))
+			}
+			continue
+		}
+		strings.write_string(&b, text)
+		any_read = true
+	}
+
+	return strings.to_string(b), any_read
+}
+
+// Splits text into lines, dropping the trailing empty element that a final
+// newline produces. Every line-oriented command wants this shape.
+input_lines :: proc(content: string, allocator := context.temp_allocator) -> []string {
+	lines := strings.split_lines(content, allocator)
+	if len(lines) > 0 && lines[len(lines) - 1] == "" {
+		return lines[:len(lines) - 1]
+	}
+	return lines
+}
 
 // Resolves a user-supplied path argument against the client's cwd.
 resolve_arg :: proc(c: ^Client, arg: string) -> string {
@@ -483,29 +437,16 @@ cmd_touch :: proc(ctx: ^Cmd_Ctx, args: []string) {
 }
 
 cmd_cat :: proc(ctx: ^Cmd_Ctx, args: []string) {
-	if len(args) == 0 {
-		errf(ctx, "cat: missing file name\n")
+	content, ok := gather_input(ctx, "cat", args)
+	if !ok {
 		return
 	}
-	user := client_get_user(ctx.client, context.temp_allocator)
 
-	for t in args {
-		abs := resolve_arg(ctx.client, t)
-		content, ok := vfs_read(&g_vfs, abs, user, context.temp_allocator)
-		if !ok {
-			if vfs_is_dir(&g_vfs, abs) {
-				errf(ctx, "cat: %s: %s\n", t, vfs_error_string(.Is_A_Directory))
-			} else {
-				errf(ctx, "cat: %s: %s\n", t, vfs_error_string(.Not_Found))
-			}
-			continue
-		}
-		// File contents are user data and may contain anything, so they are
-		// sanitized before being rendered into a terminal.
-		out(ctx, sanitize_file(ctx, content))
-		if len(content) > 0 && !strings.has_suffix(content, "\n") {
-			out(ctx, "\n")
-		}
+	// File contents are user data and may contain anything, so they are
+	// sanitized before being rendered into a terminal.
+	out(ctx, sanitize_file(ctx, content))
+	if len(content) > 0 && !strings.has_suffix(content, "\n") {
+		out(ctx, "\n")
 	}
 }
 
@@ -531,11 +472,11 @@ sanitize_file :: proc(ctx: ^Cmd_Ctx, content: string) -> string {
 }
 
 cmd_echo :: proc(ctx: ^Cmd_Ctx, args: []string) {
-	// Redirection is handled generically by execute_command, so echo is now
-	// just echo. The old implementation parsed '>' by slicing the raw line at
-	// hard-coded offsets.
-	text := join_args(args)
-	outf(ctx, "%s\n", unquote(text))
+	// Redirection, quoting and variable expansion all happen in the shell
+	// before a command ever runs, so echo is now genuinely just echo. The old
+	// implementation parsed '>' itself by slicing the raw line at hard-coded
+	// offsets.
+	outf(ctx, "%s\n", join_args(args))
 }
 
 cmd_cp :: proc(ctx: ^Cmd_Ctx, args: []string) {
@@ -716,34 +657,72 @@ cmd_find :: proc(ctx: ^Cmd_Ctx, args: []string) {
 }
 
 cmd_grep :: proc(ctx: ^Cmd_Ctx, args: []string) {
-	if len(args) < 2 {
-		errf(ctx, "grep: usage: grep <pattern> <file...>\n")
+	ignore_case := false
+	invert := false
+	count_only := false
+	numbered := true
+
+	rest := make([dynamic]string, context.temp_allocator)
+	for a in args {
+		if len(a) > 1 && a[0] == '-' {
+			for i in 1 ..< len(a) {
+				switch a[i] {
+				case 'i':
+					ignore_case = true
+				case 'v':
+					invert = true
+				case 'c':
+					count_only = true
+				case 'h':
+					numbered = false
+				}
+			}
+			continue
+		}
+		append(&rest, a)
+	}
+
+	if len(rest) == 0 {
+		errf(ctx, "grep: usage: grep [-i] [-v] [-c] <pattern> [file...]\n")
 		return
 	}
 
-	pattern := unquote(args[0])
-	user := client_get_user(ctx.client, context.temp_allocator)
-	multiple := len(args) > 2
+	pattern := rest[0]
+	if ignore_case {
+		pattern = strings.to_lower(pattern, context.temp_allocator)
+	}
 
-	for t in args[1:] {
-		abs := resolve_arg(ctx.client, t)
-		content, ok := vfs_read(&g_vfs, abs, user, context.temp_allocator)
-		if !ok {
-			errf(ctx, "grep: %s: %s\n", t, vfs_error_string(.Not_Found))
+	content, ok := gather_input(ctx, "grep", rest[1:])
+	if !ok {
+		return
+	}
+
+	matches := 0
+	for line, i in input_lines(content) {
+		haystack := ignore_case ? strings.to_lower(line, context.temp_allocator) : line
+		hit := strings.contains(haystack, pattern)
+		if hit == invert {
 			continue
 		}
-
-		for line, i in strings.split_lines(content, context.temp_allocator) {
-			if !strings.contains(line, pattern) {
-				continue
-			}
-			safe := sanitize_text(line, 400, context.temp_allocator)
-			if multiple {
-				outf(ctx, "%s:%d: %s\n", t, i + 1, safe)
-			} else {
-				outf(ctx, "%d: %s\n", i + 1, safe)
-			}
+		matches += 1
+		if count_only {
+			continue
 		}
+		safe := sanitize_text(line, 400, context.temp_allocator)
+		if numbered {
+			outf(ctx, "%d: %s\n", i + 1, safe)
+		} else {
+			outf(ctx, "%s\n", safe)
+		}
+	}
+
+	if count_only {
+		outf(ctx, "%d\n", matches)
+	}
+	// No match is a failure status, which is what makes
+	// `grep x file && echo found` work.
+	if matches == 0 {
+		ctx.status = 1
 	}
 }
 
@@ -774,25 +753,17 @@ head_tail :: proc(ctx: ^Cmd_Ctx, args: []string, from_start: bool) {
 		i += 1
 	}
 
-	if len(target) == 0 {
-		errf(ctx, "%s: missing file name\n", name)
-		return
+	files := make([dynamic]string, context.temp_allocator)
+	if len(target) > 0 {
+		append(&files, target)
 	}
 
-	user := client_get_user(ctx.client, context.temp_allocator)
-	abs := resolve_arg(ctx.client, target)
-	content, ok := vfs_read(&g_vfs, abs, user, context.temp_allocator)
+	content, ok := gather_input(ctx, name, files[:])
 	if !ok {
-		errf(ctx, "%s: %s: %s\n", name, target, vfs_error_string(.Not_Found))
 		return
 	}
 
-	lines := strings.split_lines(content, context.temp_allocator)
-	// split_lines yields a trailing empty element for content ending in \n.
-	if len(lines) > 0 && lines[len(lines) - 1] == "" {
-		lines = lines[:len(lines) - 1]
-	}
-
+	lines := input_lines(content)
 	selected := lines
 	if len(lines) > count {
 		selected = from_start ? lines[:count] : lines[len(lines) - count:]
@@ -804,23 +775,16 @@ head_tail :: proc(ctx: ^Cmd_Ctx, args: []string, from_start: bool) {
 }
 
 cmd_wc :: proc(ctx: ^Cmd_Ctx, args: []string) {
-	if len(args) == 0 {
-		errf(ctx, "wc: missing file name\n")
+	content, ok := gather_input(ctx, "wc", args)
+	if !ok {
 		return
 	}
-	user := client_get_user(ctx.client, context.temp_allocator)
 
-	for t in args {
-		abs := resolve_arg(ctx.client, t)
-		content, ok := vfs_read(&g_vfs, abs, user, context.temp_allocator)
-		if !ok {
-			errf(ctx, "wc: %s: %s\n", t, vfs_error_string(.Not_Found))
-			continue
-		}
-		lines := strings.count(content, "\n")
-		words := len(strings.fields(content, context.temp_allocator))
-		outf(ctx, "%8d %8d %8d  %s\n", lines, words, len(content), t)
-	}
+	lines := len(input_lines(content))
+	words := len(strings.fields(content, context.temp_allocator))
+	label := len(args) == 1 ? args[0] : ""
+
+	outf(ctx, "%s %s %s  %s\n", pad_int(lines, 8), pad_int(words, 8), pad_int(len(content), 8), label)
 }
 
 cmd_du :: proc(ctx: ^Cmd_Ctx, args: []string) {
@@ -853,9 +817,9 @@ cmd_df :: proc(ctx: ^Cmd_Ctx, args: []string) {
 	outf(ctx, "Filesystem      Used      Avail     Use%%\n")
 	outf(
 		ctx,
-		"entries      %7d   %8d   %5.1f%%\n",
-		u.entries,
-		u.max_entries - u.entries,
+		"entries      %s   %s   %5.1f%%\n",
+		pad_int(u.entries, 7),
+		pad_int(u.max_entries - u.entries, 8),
 		pct_entries,
 	)
 	outf(

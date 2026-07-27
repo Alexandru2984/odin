@@ -539,7 +539,7 @@ cmd_ps :: proc(ctx: ^Cmd_Ctx, args: []string) {
 		sync.mutex_lock(&c.state_lock)
 		name := strings.clone(c.name, context.temp_allocator)
 		sync.mutex_unlock(&c.state_lock)
-		outf(ctx, "%-6d %-20s webos-shell\n", c.id, name)
+		outf(ctx, "%s %-20s webos-shell\n", pad_int_left(c.id, 6), name)
 	}
 	sync.mutex_unlock(&g_clients_lock)
 }
@@ -551,7 +551,7 @@ cmd_history :: proc(ctx: ^Cmd_Ctx, args: []string) {
 		return
 	}
 	for h, i in c.history {
-		outf(ctx, "%5d  %s\n", i + 1, sanitize_text(h, 200, context.temp_allocator))
+		outf(ctx, "%s  %s\n", pad_int(i + 1, 5), sanitize_text(h, 200, context.temp_allocator))
 	}
 }
 
@@ -754,19 +754,31 @@ cmd_fortune :: proc(ctx: ^Cmd_Ctx, args: []string) {
 }
 
 cmd_rev :: proc(ctx: ^Cmd_Ctx, args: []string) {
+	// Reverses the text given, or every line arriving on the pipe.
 	if len(args) == 0 {
-		errf(ctx, "rev: usage: rev <text>\n")
+		if len(ctx.stdin) == 0 {
+			errf(ctx, "rev: usage: rev <text>   (or pipe something in)\n")
+			return
+		}
+		for line in input_lines(ctx.stdin) {
+			outf(ctx, "%s\n", reverse_runes(sanitize_text(line, 400, context.temp_allocator)))
+		}
 		return
 	}
-	text := sanitize_text(join_args(args), 400, context.temp_allocator)
 
-	// Reverse by rune so multi-byte characters survive intact.
+	text := sanitize_text(join_args(args), 400, context.temp_allocator)
+	outf(ctx, "%s\n", reverse_runes(text))
+}
+
+// Reverses by rune so multi-byte characters survive intact.
+@(private = "file")
+reverse_runes :: proc(text: string) -> string {
 	runes := utf8_runes(text)
 	b := strings.builder_make(context.temp_allocator)
 	for i := len(runes) - 1; i >= 0; i -= 1 {
 		strings.write_rune(&b, runes[i])
 	}
-	outf(ctx, "%s\n", strings.to_string(b))
+	return strings.to_string(b)
 }
 
 @(private = "file")

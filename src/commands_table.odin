@@ -59,8 +59,18 @@ COMMANDS := [?]Command {
 	{"grep", CAT_TEXT, "grep <pattern> <file...>", "Print lines matching a pattern.", cmd_grep},
 	{"head", CAT_TEXT, "head [-n N] <file>", "Print the first N lines (default 10).", cmd_head},
 	{"tail", CAT_TEXT, "tail [-n N] <file>", "Print the last N lines (default 10).", cmd_tail},
-	{"wc", CAT_TEXT, "wc <file...>", "Count lines, words and bytes.", cmd_wc},
+	{"wc", CAT_TEXT, "wc [file...]", "Count lines, words and bytes.", cmd_wc},
 	{"rev", CAT_TEXT, "rev <text>", "Reverse text.", cmd_rev},
+	{"sort", CAT_TEXT, "sort [-r] [-u] [-n] [file...]", "Sort lines. -r reverse, -u unique, -n numeric.", cmd_sort},
+	{"uniq", CAT_TEXT, "uniq [-c] [-d] [file...]", "Collapse adjacent duplicate lines. -c counts them.", cmd_uniq},
+	{"nl", CAT_TEXT, "nl [file...]", "Number every line.", cmd_nl},
+	{"tac", CAT_TEXT, "tac [file...]", "Print lines in reverse order.", cmd_tac},
+	{"cut", CAT_TEXT, "cut [-d D] [-f N] [file...]", "Print field N of each line.", cmd_cut},
+	{"tr", CAT_TEXT, "tr <upper|lower|squeeze|from to> [file...]", "Transform characters.", cmd_tr},
+	{"diff", CAT_TEXT, "diff <file-a> <file-b>", "Show which lines differ between two files.", cmd_diff},
+	{"base64", CAT_TEXT, "base64 [-d] <text|file>", "Encode or decode base64.", cmd_base64},
+	{"sha256", CAT_TEXT, "sha256 <text|file>", "Print the SHA-256 digest.", cmd_sha256},
+	{"md5", CAT_TEXT, "md5 <text|file>", "Print the MD5 digest (not for security).", cmd_md5},
 
 	// --- Identity -----------------------------------------------------------
 	{
@@ -95,6 +105,10 @@ COMMANDS := [?]Command {
 	{"free", CAT_SYS, "free", "Show VFS storage and session usage.", cmd_free},
 	{"ps", CAT_SYS, "ps", "List connected sessions as processes.", cmd_ps},
 	{"motd", CAT_SYS, "motd", "Print the message of the day.", cmd_motd},
+	{"env", CAT_SYS, "env", "List session variables.", cmd_env},
+	{"export", CAT_SYS, "export NAME=value", "Set a session variable.", cmd_export},
+	{"unset", CAT_SYS, "unset <name...>", "Remove a session variable.", cmd_unset},
+	{"dmesg", CAT_SYS, "dmesg", "Show recent request rejections.", cmd_dmesg},
 	{"version", CAT_SYS, "version", "Show version and build information.", cmd_version},
 	{"neofetch", CAT_SYS, "neofetch", "Show system information with art.", cmd_neofetch},
 
@@ -146,8 +160,16 @@ cmd_help :: proc(ctx: ^Cmd_Ctx, args: []string) {
 	}
 
 	out(ctx, "\n\x1b[1mShell\x1b[0m\n")
-	out(ctx, "  \x1b[36m>\x1b[0m file   write output to a file      ")
-	out(ctx, "\x1b[36m>>\x1b[0m file  append output to a file\n")
+	out(ctx, "  \x1b[36ma | b\x1b[0m    feed a's output into b        ")
+	out(ctx, "\x1b[36m> \x1b[0mfile    write output to a file\n")
+	out(ctx, "  \x1b[36ma && b\x1b[0m   run b only if a succeeded     ")
+	out(ctx, "\x1b[36m>>\x1b[0mfile    append output to a file\n")
+	out(ctx, "  \x1b[36ma || b\x1b[0m   run b only if a failed        ")
+	out(ctx, "\x1b[36ma ; b\x1b[0m     run both regardless\n")
+	out(ctx, "  \x1b[36m$VAR\x1b[0m     expand a variable             ")
+	out(ctx, "\x1b[36m$?\x1b[0m        status of the last command\n")
+	out(ctx, "  \x1b[36mN=value\x1b[0m  set a variable                ")
+	out(ctx, "\x1b[36m'\x1b[0m \x1b[36m\"\x1b[0m       quote, to keep spaces\n")
 
 	out(ctx, "\n\x1b[1mKeys\x1b[0m\n")
 	out(ctx, "  \x1b[36mTab\x1b[0m complete    \x1b[36m^A\x1b[0m/\x1b[36m^E\x1b[0m line start/end    ")

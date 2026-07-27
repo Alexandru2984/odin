@@ -512,7 +512,7 @@ submit_line :: proc(c: ^Client) {
 				rate_retry_after(&c.rl_cmd),
 			)
 		} else {
-			execute_command(c, trimmed)
+			shell_run(c, trimmed)
 		}
 	}
 

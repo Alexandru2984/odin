@@ -71,6 +71,12 @@ Client :: struct {
 	hist_pos:   int,
 	saved_line: string, // owned, line stashed while browsing history
 
+	// Session variables and the status of the last pipeline. Both are touched
+	// only by the reader thread, which is the only thread that runs commands,
+	// so they need no lock.
+	vars:        map[string]string, // owned keys and values
+	last_status: int,
+
 	// Which value an interactive prompt is waiting for, and what it has
 	// collected so far. Wiped by ask_clear rather than simply freed.
 	ask_state: Ask_State,
@@ -107,6 +113,7 @@ client_init :: proc(c: ^Client, socket: net.TCP_Socket, id: int, ip: string) {
 	c.line = make([dynamic]byte, 0, 128)
 	c.history = make([dynamic]string, 0, 16)
 	c.hist_pos = -1
+	c.vars = make(map[string]string)
 
 	c.name = fmt.aprintf("guest%d", id)
 	c.color = strings.clone("32") // green
@@ -142,6 +149,12 @@ client_destroy :: proc(c: ^Client) {
 		delete(h)
 	}
 	delete(c.history)
+
+	for key, value in c.vars {
+		delete(key)
+		delete(value)
+	}
+	delete(c.vars)
 }
 
 // ---------------------------------------------------------------------------
