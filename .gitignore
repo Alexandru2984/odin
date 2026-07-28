@@ -33,3 +33,6 @@ vgcore.*
 node_modules/
 dist/
 .env
+
+# Screenshots the browser suite drops in the working directory.
+*.png
