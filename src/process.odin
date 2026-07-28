@@ -362,7 +362,8 @@ job_thread :: proc(raw: rawptr) {
 	proc_end(job.pid, status)
 
 	// Announce completion the way a shell does, so a job that finishes while
-	// the user is doing something else does not just silently stop.
+	// the user is doing something else does not just silently stop. A killed
+	// job says nothing — `kill` already reported it.
 	if !proc_cancelled(job.pid) {
 		client_sendf(
 			job.client,
@@ -370,8 +371,13 @@ job_thread :: proc(raw: rawptr) {
 			job.pid,
 			sanitize_text(job.line, 60, context.temp_allocator),
 		)
-		client_send_prompt(job.client)
 	}
+
+	// The prompt is redrawn either way. Whatever the job printed landed on top
+	// of whatever the user was looking at, and without this its last line and
+	// the prompt share a row — which is exactly what a killed job looked like,
+	// since it took the early return and never redrew.
+	client_send_prompt(job.client)
 
 	free_all(context.temp_allocator)
 }
