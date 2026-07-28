@@ -11,11 +11,12 @@
    network-first, so a deploy takes effect on the next load.
 --------------------------------------------------------------------------- */
 
-const VERSION = 'webos-v2';
+const VERSION = 'webos-v3';
 const SHELL = [
   '/',
   '/style.css',
   '/app.js',
+  '/desktop.js',
   '/vendor/xterm.js',
   '/vendor/xterm.css',
   '/vendor/addon-fit.js',

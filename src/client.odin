@@ -492,10 +492,16 @@ client_set_name :: proc(c: ^Client, name: string) {
 
 client_set_cwd :: proc(c: ^Client, cwd: string) {
 	sync.mutex_lock(&c.state_lock)
-	defer sync.mutex_unlock(&c.state_lock)
 	old := c.cwd
 	c.cwd = strings.clone(cwd)
 	delete(old) // the old code simply leaked this on every cd
+	sync.mutex_unlock(&c.state_lock)
+
+	// Told to the client out of band so a window can title itself with where
+	// its shell is standing. Sent after the lock is released: client_send
+	// takes out_lock, and taking it under state_lock would invert the
+	// ordering every other path uses.
+	client_send_control(c, control_msg_str("cwd", "path", cwd))
 }
 
 client_set_color :: proc(c: ^Client, code: string) {

@@ -193,6 +193,179 @@ html, body {
 }
 #matrix.active { opacity: 1; }
 
+/* --- desktop -------------------------------------------------------------- */
+
+/* Classic and desktop occupy the same area and are swapped, not stacked, so
+   only one of them is ever laid out or measured. */
+:root[data-mode="desktop"] #terminal { display: none; }
+
+#desktop {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  min-height: 0;
+}
+#desktop.hidden { display: none; }
+
+#desktop-surface {
+  position: relative;
+  min-height: 0;
+  overflow: hidden;
+  /* A faint grid, so an empty desktop reads as a surface rather than as a
+     terminal that failed to load. */
+  background-image:
+    linear-gradient(var(--border) 1px, transparent 1px),
+    linear-gradient(90deg, var(--border) 1px, transparent 1px);
+  background-size: 32px 32px;
+  background-position: -1px -1px;
+  opacity: 1;
+}
+
+.window {
+  position: absolute;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-width: 0;
+  min-height: 0;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 0.4rem;
+  box-shadow: 0 0.6rem 1.8rem rgba(0, 0, 0, 0.45);
+  overflow: hidden;
+}
+.window.focused { border-color: var(--accent-dim); }
+.window.minimized { display: none; }
+.window.hidden-window { display: none; }
+
+/* Transitions are dropped while dragging: animating `left`/`top` at pointer
+   rate makes the window lag behind the cursor. */
+.window.dragging { transition: none; user-select: none; }
+
+.window-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  height: 30px;
+  padding: 0 0.25rem 0 0.6rem;
+  background: var(--bg-soft);
+  border-bottom: 1px solid var(--border);
+  cursor: grab;
+  touch-action: none; /* the drag handler owns the gesture */
+  user-select: none;
+}
+.window.dragging .window-bar { cursor: grabbing; }
+
+.window-title {
+  font-size: 0.72rem;
+  color: var(--fg-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.window.focused .window-title { color: var(--fg); }
+
+.window-controls { display: flex; gap: 0.15rem; flex: 0 0 auto; }
+
+.window-btn {
+  width: 1.5rem;
+  height: 1.5rem;
+  display: grid;
+  place-items: center;
+  font: inherit;
+  font-size: 0.8rem;
+  line-height: 1;
+  color: var(--fg-dim);
+  background: transparent;
+  border: 0;
+  border-radius: 0.25rem;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.window-btn:hover, .window-btn:focus-visible { color: var(--fg); background: var(--border); }
+.window-btn.close:hover { background: var(--danger); color: var(--bg); }
+
+.window-body {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  padding: 0.35rem 0.2rem 0.2rem 0.45rem;
+  overflow: hidden;
+}
+
+.window-grip {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 1rem;
+  height: 1rem;
+  cursor: nwse-resize;
+  touch-action: none;
+  background: linear-gradient(
+    135deg,
+    transparent 0 50%,
+    var(--border) 50% 60%,
+    transparent 60% 70%,
+    var(--border) 70% 80%,
+    transparent 80%
+  );
+}
+
+/* --- taskbar -------------------------------------------------------------- */
+
+#taskbar {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.3rem 0.45rem;
+  background: var(--bg-soft);
+  border-top: 1px solid var(--border);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+#taskbar::-webkit-scrollbar { display: none; }
+
+#taskbar-items { display: flex; gap: 0.35rem; min-width: 0; }
+
+.task-new, .task-item {
+  font: inherit;
+  font-size: 0.7rem;
+  white-space: nowrap;
+  color: var(--fg-dim);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 0.3rem;
+  padding: 0.25rem 0.55rem;
+  cursor: pointer;
+  touch-action: manipulation;
+  max-width: 14rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.task-new { color: var(--accent); flex: 0 0 auto; }
+.task-new:hover, .task-item:hover { color: var(--fg); border-color: var(--accent-dim); }
+.task-item.active { color: var(--bg); background: var(--accent-dim); border-color: var(--accent-dim); }
+
+/* The window limit is a refusal, not a malfunction, so it says so briefly. */
+.task-new.refused { color: var(--danger); border-color: var(--danger); }
+
+/* Below this a floating window is not usable: there is no room to have two
+   side by side, and dragging one on a touch screen fights the scroll. Windows
+   fill the surface and the taskbar becomes the way to switch between them. */
+@media (max-width: 720px) {
+  .window {
+    border-radius: 0;
+    border-left: 0;
+    border-right: 0;
+    box-shadow: none;
+  }
+  .window-grip { display: none; }
+  .window-bar { cursor: default; }
+  #desktop-surface { background-image: none; }
+}
+
 /* --- offline overlay ----------------------------------------------------- */
 
 #offline {

@@ -34,11 +34,24 @@
       <button id="btn-font-out" class="sb-btn" type="button" title="Smaller text" aria-label="Smaller text">A&minus;</button>
       <button id="btn-font-in" class="sb-btn" type="button" title="Larger text" aria-label="Larger text">A+</button>
       <button id="btn-theme" class="sb-btn" type="button" title="Change theme" aria-label="Change theme">◐</button>
+      <button id="btn-mode" class="sb-btn" type="button" title="Switch between one terminal and the desktop" aria-label="Switch between one terminal and the desktop">▤</button>
     </div>
   </header>
 
   <main id="terminal-host">
+    <!-- Classic mode: one terminal filling the page. -->
     <div id="terminal"></div>
+
+    <!-- Desktop mode: windows on a surface, with a taskbar under them. Each
+         window holds its own terminal, which is its own shell on the server. -->
+    <div id="desktop" class="hidden">
+      <div id="desktop-surface"></div>
+      <nav id="taskbar" aria-label="Open windows">
+        <button id="btn-new-window" class="task-new" type="button" title="New terminal" aria-label="New terminal">+ terminal</button>
+        <div id="taskbar-items"></div>
+      </nav>
+    </div>
+
     <canvas id="matrix" aria-hidden="true"></canvas>
 
     <!-- Shown when the socket drops, so the screen is never just frozen. -->
@@ -71,6 +84,9 @@
 
 <script src="/vendor/xterm.js"></script>
 <script src="/vendor/addon-fit.js"></script>
+<!-- desktop.js registers window.WebOSDesktop, which app.js looks for when it
+     decides which mode to boot into, so it has to come first. -->
+<script src="/desktop.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>

@@ -70,7 +70,11 @@ rate_retry_after :: proc(b: ^Rate_Bucket) -> f64 {
 // bypasses that limit entirely.
 // ---------------------------------------------------------------------------
 
-MAX_CONNS_PER_IP :: 8
+// Raised from 8 when the desktop arrived: every window is its own session,
+// so one person with a few terminals open now legitimately holds several
+// connections. Still low enough to be a real limit — a session costs three
+// threads, and MAX_CLIENTS is the ceiling that actually protects the process.
+MAX_CONNS_PER_IP :: 16
 
 Conn_Tracker :: struct {
 	lock:   sync.Mutex,

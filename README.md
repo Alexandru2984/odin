@@ -268,10 +268,44 @@ In-memory, shared, and persisted to `data/vfs.db` every 60 seconds and on
 shutdown. Three permission levels per node — public, owner-writable, private —
 plus per-user and global quotas on entry count, file size and total bytes.
 
+### The desktop
+
+A window manager over the terminal, toggled from the status bar and remembered
+between visits.
+
+Each window holds **its own shell**, not another view of the same one — a second
+window is a second session on the server, with its own directory, variables and
+history, exactly as opening a second terminal on a real machine gives you a
+second shell. They share the filesystem and see each other in `who`.
+
+Windows drag by their title bar, resize from the corner, minimise, maximise and
+close; the taskbar switches between them and opens new ones. A window titles
+itself with the directory its shell is standing in, which is what makes several
+of them tellable apart without reading their contents — the server reports it on
+the control channel whenever `cd` moves.
+
+Only geometry is remembered across a reload. The shells themselves live on the
+server and are gone the moment the socket closes, so a reload restores the same
+arrangement of windows with fresh sessions in them rather than pretending to
+restore something it cannot.
+
+Below 720px there is no room for two windows side by side and dragging fights
+the scroll, so windows fill the surface and the taskbar becomes the way to
+switch — which is what a phone does anyway.
+
+Six windows is the limit. Each one is a connection and a shell; past that it
+stops being useful and starts being a way to spend the server's session slots.
+
 ### The frontend
 
-`public/` is served straight from disk: `index.html`, one stylesheet, one
-script, a vendored xterm.js, and a service worker. No framework, no bundler.
+`public/` is served straight from disk: `index.html`, one stylesheet, two
+scripts, a vendored xterm.js, and a service worker. No framework, no bundler.
+
+`app.js` owns sessions — a terminal plus a socket — and everything shared by
+all of them: theme, font size, the matrix overlay, the touch key bar.
+`desktop.js` owns windows and never touches a socket. The split is why a
+session had to become an object: with a desktop there is no longer "the"
+terminal or "the" socket to keep in module scope.
 
 It is a PWA — installable, with an offline page. The layout is a CSS grid using
 `dvh` and `env(safe-area-inset-*)`, so it fills a phone screen correctly around
@@ -367,8 +401,12 @@ src/
   script.odin          the script interpreter
   commands_proc.odin   ps, jobs, kill, wait, sleep
   commands_test.odin   test, [, true, false
-public/                the entire frontend
+public/
+  app.js               sessions, theme, font, matrix, key bar, mode switching
+  desktop.js           the window manager
+  style.css, index.html, sw.js, vendor/
 tests/                 integration suites and their runner
+  browser/             optional Playwright checks for the front end
 deploy/                systemd unit, nginx vhost, security headers
 data/                  snapshots (created at runtime, 0600)
 ```
@@ -395,6 +433,11 @@ several sessions see it at once, and every command end to end are covered.
 server, because they create accounts and files under fixed names and a second
 run against the same state would collide with the first.
 
+`tests/browser/` holds Playwright checks for the desktop, on a desktop and a
+phone viewport. They are deliberately **not** part of `make deploy`: they need
+a browser the deployment host is not required to have. Run them by hand when
+the front end changes — they are also how the layout screenshots get taken.
+
 ## Status
 
 - [x] HTTP/1.1 and WebSocket server, written from scratch
@@ -415,4 +458,4 @@ run against the same state would collide with the first.
 - [x] Interrupting a foreground command with `^C`
 - [ ] Per-user persistent settings beyond the VFS
 - [x] `/metrics` for Prometheus, closed to the internet
-- [ ] A minimal desktop: more than one window over the same session
+- [x] A desktop: draggable windows, a taskbar, one shell per window
