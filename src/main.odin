@@ -340,6 +340,13 @@ run_terminal_session :: proc(socket: net.TCP_Socket, ip: string) {
 	client.writer_thread = writer
 	thread.start(writer)
 
+	// The executor starts before the client is published, for the same reason
+	// the writer does: no input may arrive with nobody to run it.
+	executor := thread.create(client_executor_proc)
+	executor.data = client
+	client.executor_thread = executor
+	thread.start(executor)
+
 	sync.mutex_lock(&g_clients_lock)
 	append(&g_clients, client)
 	sync.mutex_unlock(&g_clients_lock)
@@ -360,6 +367,14 @@ run_terminal_session :: proc(socket: net.TCP_Socket, ip: string) {
 	terminal_loop(client, &conn)
 
 	// --- Teardown -----------------------------------------------------------
+	// Stop the work before stopping the threads. A command still running would
+	// otherwise hold the executor past the join, and nobody is left to read
+	// what it prints.
+	proc_kill_session(client.id)
+	client_close_input(client)
+	thread.join(executor)
+	thread.destroy(executor)
+
 	// Remove from the registry first so no further broadcast can reach this
 	// client, then stop the writer, then free. Freeing while still published
 	// is exactly the use-after-free the old teardown had.
@@ -379,9 +394,8 @@ run_terminal_session :: proc(socket: net.TCP_Socket, ip: string) {
 	thread.destroy(writer) // the old code never destroyed its threads
 
 	// Background jobs hold their own reference and may still be running, so
-	// the connection releases its reference rather than freeing outright. Ask
-	// them to stop first: nobody is left to read their output.
-	proc_kill_session(client.id)
+	// the connection releases its reference rather than freeing outright.
+	// They were asked to stop above, along with the foreground command.
 	client_unref(client)
 
 	broadcast_notice(fmt.tprintf("\x1b[33m*\x1b[0m %s disconnected\r\n", departed), -1)
@@ -392,9 +406,8 @@ terminal_loop :: proc(client: ^Client, conn: ^WS_Conn) {
 	missed_pongs := 0
 
 	for {
-		// Reclaim everything the previous command allocated from the temp
-		// arena. Without this the arena grows for the life of the connection,
-		// and the old code called fmt.tprintf on literally every keystroke.
+		// Reclaim this thread's own scratch. Commands allocate on the
+		// executor's arena now, which it reclaims itself.
 		free_all(context.temp_allocator)
 
 		if client_is_dead(client) {
@@ -440,7 +453,10 @@ terminal_loop :: proc(client: ^Client, conn: ^WS_Conn) {
 
 		switch msg.opcode {
 		case .Text:
-			handle_input(client, string(msg.payload))
+			// Queued rather than run here: commands now execute on the
+			// executor thread, which is what leaves this one free to notice a
+			// `^C` while a command is still running.
+			client_feed_input(client, string(msg.payload))
 
 		case .Binary:
 			// The client's control channel: terminal size, and anything added

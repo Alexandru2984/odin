@@ -133,6 +133,17 @@ mid-write. Disconnecting cancels everything the session started — but the
 client is reference-counted, so a job that has not noticed yet cannot write
 into freed memory.
 
+**`^C` interrupts whatever is running.** That took an architectural change:
+commands used to run on the thread reading the socket, so a long command owned
+the connection and the keystroke sat unread until it finished. There was
+nothing to press. Each connection now has three threads — a reader, an
+executor, a writer — and the reader resolves `^C` itself, because the executor
+is inside the very command the interrupt is meant to stop. Anything else in the
+same frame still reaches the queue.
+
+With no command running, `^C` is line editing again and simply clears what was
+typed.
+
 ### Scripts
 
 `sh <file>` runs a file out of the filesystem. Write one with `edit`, make it
@@ -287,8 +298,8 @@ per-IP cap is bypassable by setting a header.
 attempts, plus a per-IP connection cap. Broadcasts are the obvious griefing
 primitive and are limited to one per five seconds sustained.
 
-**Concurrency.** One reader thread and one writer thread per connection, with a
-bounded output queue — a peer that stops reading gets dropped rather than
+**Concurrency.** Three threads per connection — reader, executor, writer — with
+bounded queues in both directions — a peer that stops reading gets dropped rather than
 pinning a writer. Lock ordering is fixed and documented (`g_clients_lock →
 state_lock → out_lock`) so it cannot deadlock.
 
@@ -372,8 +383,7 @@ run against the same state would collide with the first.
 - [x] Integration suites in the repo, gating deployment
 - [x] A process model: background jobs, `jobs`/`kill`/`wait`, a real `ps`
 - [x] Scripts stored in the VFS, with arguments and control flow
-- [ ] Interrupting a *foreground* command with `^C`, which needs command
-      execution moved off the reader thread
+- [x] Interrupting a foreground command with `^C`
 - [ ] Per-user persistent settings beyond the VFS
 - [ ] `/metrics` for the Prometheus instance already running on the host
 - [ ] A minimal desktop: more than one window over the same session

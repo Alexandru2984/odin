@@ -164,8 +164,10 @@ cmd_kill :: proc(ctx: ^Cmd_Ctx, args: []string) {
 //
 // The wait is a poll rather than a condition variable: a job signalling
 // completion would have to reach across to whichever thread happens to be
-// waiting, and this runs on the reader thread where a spurious extra second
-// costs nothing.
+// waiting, and a spurious extra tenth of a second costs nothing here.
+//
+// It blocks the executor, not the reader, so `^C` still arrives — which is
+// what the cancellation check below is for.
 cmd_wait :: proc(ctx: ^Cmd_Ctx, args: []string) {
 	MAX_WAIT :: 60 * time.Second
 	POLL :: 100 * time.Millisecond
@@ -207,6 +209,12 @@ cmd_wait :: proc(ctx: ^Cmd_Ctx, args: []string) {
 		}
 		if time.since(deadline) >= 0 {
 			errf(ctx, "wait: still running after %v\n", MAX_WAIT)
+			return
+		}
+		// ^C gets out of a wait, which is the whole reason anyone would press
+		// it here: the jobs keep running, the waiting stops.
+		if proc_cancelled(ctx.proc_id) {
+			errf(ctx, "wait: interrupted\n")
 			return
 		}
 		time.sleep(POLL)

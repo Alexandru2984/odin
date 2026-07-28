@@ -67,6 +67,11 @@ MAX_WS_MESSAGE   :: 16 * 1024 // reassembled application message
 MAX_WS_FRAME     :: 64 * 1024 // single frame payload
 MAX_OUT_PENDING  :: 512 * 1024 // per-client queued output before we drop them
 
+// Per-client queued *input* awaiting the executor. A peer that types faster
+// than commands finish fills its own buffer and is dropped, rather than
+// growing ours without limit.
+MAX_INPUT_PENDING :: 64 * 1024
+
 // ---------------------------------------------------------------------------
 // Timeouts
 // ---------------------------------------------------------------------------

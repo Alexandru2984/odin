@@ -1,5 +1,6 @@
 package main
 
+import "base:intrinsics"
 import "base:runtime"
 import "core:fmt"
 import "core:strings"
@@ -668,7 +669,14 @@ shell_run :: proc(c: ^Client, line: string) {
 		sanitize_text(line, 80, context.temp_allocator),
 		false,
 	)
+
+	// Published so the reader thread knows what a `^C` should interrupt, and
+	// cleared before proc_end so an interrupt can never land on a pid that has
+	// already finished and been reused.
+	intrinsics.atomic_store(&c.current_pid, pid)
 	run_token_list(c, tokens, Exec{pid = pid, status = &c.last_status})
+	intrinsics.atomic_store(&c.current_pid, 0)
+
 	proc_end(pid, c.last_status)
 }
 

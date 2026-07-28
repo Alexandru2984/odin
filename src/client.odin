@@ -40,6 +40,26 @@ Client :: struct {
 	out_overflow: bool, // queue limit hit, connection must be dropped
 	dead:        bool, // transport failed, both threads should unwind
 
+	// --- Input queue --------------------------------------------------------
+	// Guarded by in_lock. The reader thread appends keystrokes, the executor
+	// thread drains them.
+	//
+	// The split exists so that `^C` can reach a command that is already
+	// running. While a command runs it owns the executor, so a reader that
+	// also ran commands could not look at the socket again until the command
+	// finished — which is exactly when the interrupt is needed.
+	in_lock:   sync.Mutex,
+	in_cond:   sync.Cond,
+	in_buf:    [dynamic]byte,
+	in_closed: bool,
+
+	// The process the executor is running right now, or 0 when it is idle.
+	// Written by the executor, read by the reader with atomics: it decides
+	// whether a `^C` interrupts a command or just clears the input line.
+	current_pid: int,
+
+	executor_thread: ^thread.Thread,
+
 	// --- Session state ------------------------------------------------------
 	// Guarded by state_lock. Read by other threads during broadcast, so every
 	// field here is owned heap memory with a strictly defined lifetime.
@@ -137,6 +157,7 @@ client_init :: proc(c: ^Client, socket: net.TCP_Socket, id: int, ip: string) {
 	c.refs = 1 // the connection's own reference
 
 	c.out = make([dynamic]byte, 0, 4096)
+	c.in_buf = make([dynamic]byte, 0, 256)
 	c.line = make([dynamic]byte, 0, 128)
 	c.history = make([dynamic]string, 0, 16)
 	c.hist_pos = -1
@@ -187,6 +208,7 @@ client_destroy :: proc(c: ^Client) {
 
 	delete(c.ip)
 	delete(c.out)
+	delete(c.in_buf)
 	delete(c.line)
 	delete(c.name)
 	delete(c.color)
@@ -286,6 +308,95 @@ client_is_dead :: proc(c: ^Client) -> bool {
 }
 
 // Writer thread: drains the output queue onto the socket.
+// ---------------------------------------------------------------------------
+// Input queue
+// ---------------------------------------------------------------------------
+
+// Queues keystrokes for the executor, handling `^C` on the way past.
+//
+// The interrupt is resolved here, on the reader thread, precisely because the
+// executor cannot: it is inside the command the interrupt is meant to stop.
+// Everything else in the same frame still goes to the queue, so a burst that
+// happens to contain a `^C` does not lose the rest of its bytes.
+client_feed_input :: proc(c: ^Client, data: string) {
+	payload := data
+
+	if intrinsics.atomic_load(&c.current_pid) != 0 && strings.contains_rune(data, KEY_CTRL_C) {
+		pid := intrinsics.atomic_load(&c.current_pid)
+		if pid != 0 {
+			proc_kill(pid, c.id)
+			// Echoed the way a terminal does, so the interrupt is visible even
+			// when the command it stopped prints nothing.
+			client_send(c, "^C\r\n")
+		}
+
+		b := strings.builder_make(context.temp_allocator)
+		for i in 0 ..< len(data) {
+			if data[i] != KEY_CTRL_C {
+				strings.write_byte(&b, data[i])
+			}
+		}
+		payload = strings.to_string(b)
+	}
+
+	if len(payload) == 0 {
+		return
+	}
+
+	sync.mutex_lock(&c.in_lock)
+	defer sync.mutex_unlock(&c.in_lock)
+
+	// Bounded like every other queue: a peer that types faster than commands
+	// run must fill its own buffer and be dropped, not grow ours forever.
+	if len(c.in_buf) + len(payload) > MAX_INPUT_PENDING {
+		c.in_closed = true
+		sync.cond_signal(&c.in_cond)
+		client_mark_dead(c)
+		return
+	}
+
+	append(&c.in_buf, ..transmute([]byte)payload)
+	sync.cond_signal(&c.in_cond)
+}
+
+// Tells the executor there will be no more input.
+client_close_input :: proc(c: ^Client) {
+	sync.mutex_lock(&c.in_lock)
+	c.in_closed = true
+	sync.cond_signal(&c.in_cond)
+	sync.mutex_unlock(&c.in_lock)
+}
+
+// Runs the line editor and every command, one connection's worth.
+client_executor_proc :: proc(t: ^thread.Thread) {
+	c := cast(^Client)t.data
+
+	scratch := make([dynamic]byte, 0, 256)
+	defer delete(scratch)
+
+	for {
+		sync.mutex_lock(&c.in_lock)
+		for len(c.in_buf) == 0 && !c.in_closed {
+			sync.cond_wait(&c.in_cond, &c.in_lock)
+		}
+		if len(c.in_buf) == 0 {
+			sync.mutex_unlock(&c.in_lock)
+			return // closed and drained
+		}
+
+		clear(&scratch)
+		append(&scratch, ..c.in_buf[:])
+		clear(&c.in_buf)
+		sync.mutex_unlock(&c.in_lock)
+
+		handle_input(c, string(scratch[:]))
+
+		// Reclaim everything the command allocated. This used to live in the
+		// reader loop, which is no longer where commands run.
+		free_all(context.temp_allocator)
+	}
+}
+
 client_writer_proc :: proc(t: ^thread.Thread) {
 	c := cast(^Client)t.data
 
