@@ -489,6 +489,42 @@ test_human_size :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_truncate_counts_runes :: proc(t: ^testing.T) {
+	testing.expect_value(t, truncate_runes("short", 10, context.temp_allocator), "short")
+	testing.expect_value(t, truncate_runes("abcdefgh", 4, context.temp_allocator), "abc…")
+
+	// Multi-byte text must not be cut through the middle of a character, which
+	// a byte-based slice would do and render as replacement glyphs.
+	got := truncate_runes("ăăăăăă", 4, context.temp_allocator)
+	testing.expect_value(t, got, "ăăă…")
+	testing.expect_value(t, strings.rune_count(got), 4)
+}
+
+@(test)
+test_duration_formatting :: proc(t: ^testing.T) {
+	testing.expect_value(t, duration_short(0, context.temp_allocator), "0s")
+	testing.expect_value(t, duration_short(45, context.temp_allocator), "45s")
+	// Zero-padded, because "3m7s" reads as a missing digit in a column.
+	testing.expect_value(t, duration_short(187, context.temp_allocator), "3m07s")
+	testing.expect_value(t, duration_short(3720, context.temp_allocator), "1h02m")
+}
+
+@(test)
+test_session_commands_are_refused_in_the_background :: proc(t: ^testing.T) {
+	// These mutate state the reader thread owns without a lock, so a detached
+	// job must not be allowed to run them.
+	session := [?]string{"cd", "export", "login", "logout", "alias", "edit"}
+	for name in session {
+		testing.expect(t, is_session_command(name), "session command recognised")
+	}
+	// Everything else is safe to detach: it only touches the VFS, which locks.
+	ordinary := [?]string{"ls", "cat", "grep", "sleep", "find", "echo"}
+	for name in ordinary {
+		testing.expect(t, !is_session_command(name), "ordinary command not restricted")
+	}
+}
+
+@(test)
 test_colour_lookup_never_passes_input_through :: proc(t: ^testing.T) {
 	// The colour is interpolated into an escape sequence, so an unknown value
 	// must map to "" and be refused rather than reaching the terminal.

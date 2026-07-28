@@ -1,5 +1,6 @@
 package main
 
+import "base:intrinsics"
 import "core:fmt"
 import "core:net"
 import "core:strings"
@@ -87,6 +88,15 @@ Client :: struct {
 	// reasoning: only the command runner touches it.
 	subst_depth: int,
 
+	// How many things still hold this pointer: the connection itself, plus one
+	// for every background job it started. The last one to let go frees it.
+	//
+	// Without this a job that outlives its session writes into freed memory,
+	// and the session's teardown cannot simply wait for it: a job is only
+	// guaranteed to stop at its next cancellation check, and a command that
+	// never checks would pin the connection thread forever.
+	refs:        int,
+
 	// The full-screen editor, when one is open. Reader-thread private: only
 	// the thread running commands ever touches it.
 	editor: Editor,
@@ -122,6 +132,7 @@ client_init :: proc(c: ^Client, socket: net.TCP_Socket, id: int, ip: string) {
 	c.id = id
 	c.socket = socket
 	c.ip = strings.clone(ip)
+	c.refs = 1 // the connection's own reference
 
 	c.out = make([dynamic]byte, 0, 4096)
 	c.line = make([dynamic]byte, 0, 128)
@@ -148,6 +159,21 @@ client_init :: proc(c: ^Client, socket: net.TCP_Socket, id: int, ip: string) {
 	now := time.now()
 	c.connected_at = now
 	c.last_activity = now
+}
+
+// Takes a reference. Every caller must pair it with client_unref.
+client_ref :: proc(c: ^Client) {
+	intrinsics.atomic_add(&c.refs, 1)
+}
+
+// Releases a reference, freeing the client when the last one goes.
+client_unref :: proc(c: ^Client) {
+	// atomic_sub returns the value before the subtraction, so 1 means this
+	// call took the count to zero.
+	if intrinsics.atomic_sub(&c.refs, 1) == 1 {
+		client_destroy(c)
+		free(c)
+	}
 }
 
 client_destroy :: proc(c: ^Client) {

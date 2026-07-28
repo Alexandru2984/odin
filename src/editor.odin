@@ -60,7 +60,7 @@ cmd_edit :: proc(ctx: ^Cmd_Ctx, args: []string) {
 		return
 	}
 
-	abs := resolve_arg(c, args[0])
+	abs := resolve_arg_client(c, args[0])
 	if err := vfs_validate_path(abs); err != .None {
 		errf(ctx, "edit: %s: %s\n", args[0], vfs_error_string(err))
 		return

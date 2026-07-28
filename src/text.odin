@@ -275,6 +275,48 @@ pad_int_left :: proc(n: int, width: int, allocator := context.temp_allocator) ->
 	return fmt.aprintf("%-*s", width, fmt.tprintf("%d", n), allocator = allocator)
 }
 
+// Zero-padded, for the minutes and seconds of a duration where a space would
+// read as a missing digit.
+pad_int_zero :: proc(n: int, width: int, allocator := context.temp_allocator) -> string {
+	b := strings.builder_make(allocator)
+	digits := fmt.tprintf("%d", n)
+	for _ in len(digits) ..< width {
+		strings.write_byte(&b, '0')
+	}
+	strings.write_string(&b, digits)
+	return strings.to_string(b)
+}
+
+// Shortens text to `limit` runes, marking that it was cut.
+//
+// Counts runes rather than bytes so a multi-byte name is never sliced through
+// the middle of a character and rendered as replacement glyphs.
+truncate_runes :: proc(s: string, limit: int, allocator := context.temp_allocator) -> string {
+	if limit <= 1 {
+		return strings.clone("", allocator)
+	}
+
+	count := 0
+	for _ in s {
+		count += 1
+	}
+	if count <= limit {
+		return strings.clone(s, allocator)
+	}
+
+	b := strings.builder_make(allocator)
+	written := 0
+	for r in s {
+		if written >= limit - 1 {
+			break
+		}
+		strings.write_rune(&b, r)
+		written += 1
+	}
+	strings.write_string(&b, "…")
+	return strings.to_string(b)
+}
+
 // Joins a directory and a file name with a single separator.
 concat_path :: proc(dir: string, name: string, allocator := context.allocator) -> string {
 	if len(dir) == 0 {

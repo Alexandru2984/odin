@@ -271,10 +271,10 @@ cmd_diff :: proc(ctx: ^Cmd_Ctx, args: []string) {
 		return
 	}
 
-	user := client_get_user(ctx.client, context.temp_allocator)
+	user := ctx.user
 
-	a_path := resolve_arg(ctx.client, args[0])
-	b_path := resolve_arg(ctx.client, args[1])
+	a_path := resolve_arg(ctx, args[0])
+	b_path := resolve_arg(ctx, args[1])
 
 	a_text, a_ok := vfs_read(&g_vfs, a_path, user, context.temp_allocator)
 	if !a_ok {
@@ -340,7 +340,7 @@ cmd_base64 :: proc(ctx: ^Cmd_Ctx, args: []string) {
 	// Text given directly on the command line is more useful here than
 	// requiring a file, so fall back to treating the arguments as the input.
 	content: string
-	if len(rest) > 0 && !vfs_exists(&g_vfs, resolve_arg(ctx.client, rest[0])) {
+	if len(rest) > 0 && !vfs_exists(&g_vfs, resolve_arg(ctx, rest[0])) {
 		content = join_args(rest[:])
 	} else {
 		ok: bool
@@ -383,7 +383,7 @@ digest_command :: proc(
 	args: []string,
 ) {
 	content: string
-	if len(args) > 0 && !vfs_exists(&g_vfs, resolve_arg(ctx.client, args[0])) {
+	if len(args) > 0 && !vfs_exists(&g_vfs, resolve_arg(ctx, args[0])) {
 		content = join_args(args)
 	} else {
 		ok: bool

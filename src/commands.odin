@@ -27,6 +27,21 @@ Cmd_Ctx :: struct {
 	// 0 means success. `&&` and `||` are built on this, and errf sets it, so
 	// any command that reports an error automatically breaks a chain.
 	status:  int,
+
+	// Where the command is standing and who it is acting as, resolved once
+	// when the stage starts.
+	//
+	// Commands used to reach into the live session for both. A background job
+	// runs on another thread, against a session that can `cd` or `logout` out
+	// from under it, so it needs its own copy — and taking the copy at the
+	// start of the stage is also what makes `cd x | pwd` behave like a real
+	// shell, where each stage is its own subshell.
+	cwd:     string, // borrowed, valid for this command only
+	user:    string, // borrowed; "" for a guest
+
+	// The process this command belongs to, when there is one. Long-running
+	// loops poll it so `kill` and a disconnect can stop them.
+	proc_id: int,
 }
 
 // Writes command output. Newlines are normalised to CRLF for the terminal but
@@ -141,12 +156,12 @@ gather_input :: proc(
 		return ctx.stdin, true
 	}
 
-	user := client_get_user(ctx.client, context.temp_allocator)
+	user := ctx.user
 	b := strings.builder_make(context.temp_allocator)
 	any_read := false
 
 	for f in files {
-		abs := resolve_arg(ctx.client, f)
+		abs := resolve_arg(ctx, f)
 		text, read_ok := vfs_read(&g_vfs, abs, user, context.temp_allocator)
 		if !read_ok {
 			if vfs_is_dir(&g_vfs, abs) {
@@ -173,8 +188,16 @@ input_lines :: proc(content: string, allocator := context.temp_allocator) -> []s
 	return lines
 }
 
-// Resolves a user-supplied path argument against the client's cwd.
-resolve_arg :: proc(c: ^Client, arg: string) -> string {
+// Resolves a user-supplied path argument against the directory the command is
+// running in.
+resolve_arg :: proc(ctx: ^Cmd_Ctx, arg: string) -> string {
+	return vfs_resolve_path(ctx.cwd, unquote(arg), context.temp_allocator)
+}
+
+// The same, for the few places that have a session but no command context:
+// tab completion and the editor, both of which only ever run in the
+// foreground, on the reader thread.
+resolve_arg_client :: proc(c: ^Client, arg: string) -> string {
 	cwd := client_get_cwd(c, context.temp_allocator)
 	return vfs_resolve_path(cwd, unquote(arg), context.temp_allocator)
 }
@@ -189,12 +212,12 @@ join_args :: proc(args: []string) -> string {
 // ---------------------------------------------------------------------------
 
 cmd_pwd :: proc(ctx: ^Cmd_Ctx, args: []string) {
-	cwd := client_get_cwd(ctx.client, context.temp_allocator)
+	cwd := ctx.cwd
 	outf(ctx, "%s\n", cwd)
 }
 
 cmd_cd :: proc(ctx: ^Cmd_Ctx, args: []string) {
-	user := client_get_user(ctx.client, context.temp_allocator)
+	user := ctx.user
 
 	target: string
 	if len(args) == 0 {
@@ -206,7 +229,7 @@ cmd_cd :: proc(ctx: ^Cmd_Ctx, args: []string) {
 			target = "/tmp"
 		}
 	} else {
-		target = resolve_arg(ctx.client, args[0])
+		target = resolve_arg(ctx, args[0])
 	}
 
 	if err := vfs_can_enter(&g_vfs, target, user); err != .None {
@@ -236,13 +259,13 @@ cmd_ls :: proc(ctx: ^Cmd_Ctx, args: []string) {
 			append(&targets, a)
 		}
 	}
-	user := client_get_user(ctx.client, context.temp_allocator)
+	user := ctx.user
 
 	// More than one target is now the common case, not an exotic one: a glob
 	// hands `ls` every match at once, and `ls *.txt` has to list the files
 	// rather than complain that the first one is not a directory.
 	if len(targets) == 0 {
-		cwd := client_get_cwd(ctx.client, context.temp_allocator)
+		cwd := ctx.cwd
 		ls_directory(ctx, cwd, user, long, all, false)
 		return
 	}
@@ -253,7 +276,7 @@ cmd_ls :: proc(ctx: ^Cmd_Ctx, args: []string) {
 	dirs := make([dynamic]string, context.temp_allocator)
 
 	for t in targets {
-		abs := resolve_arg(ctx.client, t)
+		abs := resolve_arg(ctx, t)
 		if vfs_is_dir(&g_vfs, abs) {
 			append(&dirs, abs)
 			continue
@@ -416,10 +439,10 @@ cmd_mkdir :: proc(ctx: ^Cmd_Ctx, args: []string) {
 		}
 	}
 
-	user := client_get_user(ctx.client, context.temp_allocator)
+	user := ctx.user
 
 	for t in targets {
-		abs := resolve_arg(ctx.client, t)
+		abs := resolve_arg(ctx, t)
 		err := parents ? vfs_mkdir_all(&g_vfs, abs, user) : vfs_mkdir(&g_vfs, abs, user)
 		if err != .None {
 			errf(ctx, "mkdir: %s: %s\n", t, vfs_error_string(err))
@@ -434,10 +457,10 @@ cmd_rmdir :: proc(ctx: ^Cmd_Ctx, args: []string) {
 		errf(ctx, "rmdir: missing operand\n")
 		return
 	}
-	user := client_get_user(ctx.client, context.temp_allocator)
+	user := ctx.user
 
 	for t in args {
-		abs := resolve_arg(ctx.client, t)
+		abs := resolve_arg(ctx, t)
 		if err := vfs_rmdir(&g_vfs, abs, user); err != .None {
 			errf(ctx, "rmdir: %s: %s\n", t, vfs_error_string(err))
 			continue
@@ -468,10 +491,10 @@ cmd_rm :: proc(ctx: ^Cmd_Ctx, args: []string) {
 		}
 	}
 
-	user := client_get_user(ctx.client, context.temp_allocator)
+	user := ctx.user
 
 	for t in targets {
-		abs := resolve_arg(ctx.client, t)
+		abs := resolve_arg(ctx, t)
 		if recursive {
 			n, err := vfs_rm_recursive(&g_vfs, abs, user)
 			if err != .None {
@@ -494,10 +517,10 @@ cmd_touch :: proc(ctx: ^Cmd_Ctx, args: []string) {
 		errf(ctx, "touch: missing operand\n")
 		return
 	}
-	user := client_get_user(ctx.client, context.temp_allocator)
+	user := ctx.user
 
 	for t in args {
-		abs := resolve_arg(ctx.client, t)
+		abs := resolve_arg(ctx, t)
 		if vfs_exists(&g_vfs, abs) {
 			continue
 		}
@@ -555,10 +578,10 @@ cmd_cp :: proc(ctx: ^Cmd_Ctx, args: []string) {
 		errf(ctx, "cp: usage: cp <source> <destination>\n")
 		return
 	}
-	user := client_get_user(ctx.client, context.temp_allocator)
+	user := ctx.user
 
-	src := resolve_arg(ctx.client, args[0])
-	dst := resolve_arg(ctx.client, args[1])
+	src := resolve_arg(ctx, args[0])
+	dst := resolve_arg(ctx, args[1])
 
 	content, ok := vfs_read(&g_vfs, src, user, context.temp_allocator)
 	if !ok {
@@ -582,10 +605,10 @@ cmd_mv :: proc(ctx: ^Cmd_Ctx, args: []string) {
 		errf(ctx, "mv: usage: mv <source> <destination>\n")
 		return
 	}
-	user := client_get_user(ctx.client, context.temp_allocator)
+	user := ctx.user
 
-	src := resolve_arg(ctx.client, args[0])
-	dst := resolve_arg(ctx.client, args[1])
+	src := resolve_arg(ctx, args[0])
+	dst := resolve_arg(ctx, args[1])
 
 	content, ok := vfs_read(&g_vfs, src, user, context.temp_allocator)
 	if !ok {
@@ -613,8 +636,8 @@ cmd_stat :: proc(ctx: ^Cmd_Ctx, args: []string) {
 		errf(ctx, "stat: missing operand\n")
 		return
 	}
-	user := client_get_user(ctx.client, context.temp_allocator)
-	abs := resolve_arg(ctx.client, args[0])
+	user := ctx.user
+	abs := resolve_arg(ctx, args[0])
 
 	st, ok := vfs_stat(&g_vfs, abs, user, context.temp_allocator)
 	if !ok {
@@ -649,29 +672,29 @@ cmd_chmod :: proc(ctx: ^Cmd_Ctx, args: []string) {
 		return
 	}
 
-	user := client_get_user(ctx.client, context.temp_allocator)
+	user := ctx.user
 	if len(user) == 0 {
 		errf(ctx, "chmod: you must be logged in to own files\n")
 		return
 	}
 
-	abs := resolve_arg(ctx.client, args[1])
+	abs := resolve_arg(ctx, args[1])
 	if err := vfs_chmod(&g_vfs, abs, perm, user); err != .None {
 		errf(ctx, "chmod: %s: %s\n", args[1], vfs_error_string(err))
 	}
 }
 
 cmd_tree :: proc(ctx: ^Cmd_Ctx, args: []string) {
-	root := client_get_cwd(ctx.client, context.temp_allocator)
+	root := ctx.cwd
 	if len(args) > 0 {
-		root = resolve_arg(ctx.client, args[0])
+		root = resolve_arg(ctx, args[0])
 	}
 	if !vfs_is_dir(&g_vfs, root) {
 		errf(ctx, "tree: %s: %s\n", root, vfs_error_string(.Not_A_Directory))
 		return
 	}
 
-	user := client_get_user(ctx.client, context.temp_allocator)
+	user := ctx.user
 	paths := vfs_walk(&g_vfs, root, user, context.temp_allocator)
 	slice.sort(paths)
 
@@ -700,7 +723,7 @@ cmd_tree :: proc(ctx: ^Cmd_Ctx, args: []string) {
 }
 
 cmd_find :: proc(ctx: ^Cmd_Ctx, args: []string) {
-	root := client_get_cwd(ctx.client, context.temp_allocator)
+	root := ctx.cwd
 	pattern := ""
 
 	for a in args {
@@ -711,7 +734,7 @@ cmd_find :: proc(ctx: ^Cmd_Ctx, args: []string) {
 		}
 	}
 
-	user := client_get_user(ctx.client, context.temp_allocator)
+	user := ctx.user
 	paths := vfs_walk(&g_vfs, root, user, context.temp_allocator)
 	slice.sort(paths)
 
@@ -931,12 +954,12 @@ cmd_wc :: proc(ctx: ^Cmd_Ctx, args: []string) {
 }
 
 cmd_du :: proc(ctx: ^Cmd_Ctx, args: []string) {
-	root := client_get_cwd(ctx.client, context.temp_allocator)
+	root := ctx.cwd
 	if len(args) > 0 {
-		root = resolve_arg(ctx.client, args[0])
+		root = resolve_arg(ctx, args[0])
 	}
 
-	user := client_get_user(ctx.client, context.temp_allocator)
+	user := ctx.user
 	paths := vfs_walk(&g_vfs, root, user, context.temp_allocator)
 
 	total := 0
@@ -1101,7 +1124,7 @@ handle_autocomplete :: proc(c: ^Client) {
 			base_part = prefix[slash + 1:]
 		}
 
-		dir := len(dir_part) > 0 ? resolve_arg(c, dir_part) : client_get_cwd(c, context.temp_allocator)
+		dir := len(dir_part) > 0 ? resolve_arg_client(c, dir_part) : client_get_cwd(c, context.temp_allocator)
 		user := client_get_user(c, context.temp_allocator)
 
 		entries, err := vfs_list(&g_vfs, dir, user, context.temp_allocator)

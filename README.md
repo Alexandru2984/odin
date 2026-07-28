@@ -81,6 +81,7 @@ Not a command dispatcher. A small but real shell language, in `src/shell.odin`:
 - **quoting** — single quotes are literal, double quotes group and expand
 - **variables** — `export NAME=value`, `$NAME`, `${NAME}`, `$?`, `$USER`, `$PWD`
 - **aliases** — `alias ll='ls -l'`, `unalias ll`
+- **background jobs** — `sleep 30 &`, then `jobs`, `kill`, `wait`
 
 Expansion happens at execution time, not at lex time. That is a deliberate
 design decision rather than an implementation detail: expanding during the lex
@@ -98,7 +99,40 @@ variables, 4 KiB per value, 16 KiB of total expansion, 4 levels of `$( )`
 nesting, 512 results from one glob. A shell that grows a buffer on user input
 is a denial-of-service primitive.
 
-### 76 commands
+### Processes
+
+`ps` used to list connections and call them processes. Nothing was tracked: a
+command ran to completion and left no trace, so there was nothing to see, wait
+for or kill.
+
+A process is now one pipeline running for one session, and every pipeline gets
+an entry — foreground or not — so `ps` shows what the machine is doing rather
+than who is connected. `ps -a` shows everyone's.
+
+```
+webos:/$ sleep 30 &
+[7] started
+webos:/$ jobs
+[7]  running  sleep 30
+webos:/$ kill 7
+[7] killed
+```
+
+`cmd &` runs the pipeline on its own thread against a **snapshot** of the
+session — its directory and its user, taken at spawn time. That is a safety
+requirement and correct semantics at once: the reader thread owns the session's
+cwd, variables and aliases without a lock, and a subshell's `cd` has never
+moved its parent. Commands that exist to change the session (`cd`, `export`,
+`login`, `edit`, …) are refused in the background rather than racing or
+silently doing nothing.
+
+Cancellation is cooperative. `kill` sets a flag, and long-running work checks
+it between pipeline stages and inside its own loops, so nothing is preempted
+mid-write. Disconnecting cancels everything the session started — but the
+client is reference-counted, so a job that has not noticed yet cannot write
+into freed memory.
+
+### 80 commands
 
 Filesystem
 : `ls` `cd` `pwd` `mkdir` `rmdir` `rm` `touch` `cp` `mv` `stat` `chmod` `tree` `find` `du` `df`
@@ -113,7 +147,7 @@ Social
 : `who` `wall` `msg` `mail` `me` `bell`
 
 System
-: `help` `man` `uname` `uptime` `date` `cal` `ps` `free` `dmesg` `version` `motd` `neofetch` `clear` `theme` `history` `alias` `unalias` `export` `unset` `env`
+: `help` `man` `uname` `uptime` `date` `cal` `free` `dmesg` `version` `motd` `neofetch` `clear` `theme` `history` `alias` `unalias` `export` `unset` `env` `ps` `jobs` `kill` `wait` `sleep`
 
 Fun
 : `fortune` `cowsay` `matrix` `banner` `roll` `8ball` `calc` `clearall`
@@ -244,6 +278,8 @@ src/
   log.odin             structured logging and abuse aggregation
   text.odin            sanitisation and formatting helpers
   glob.odin            pattern matching and the glob scan
+  process.odin         the process table and background jobs
+  commands_proc.odin   ps, jobs, kill, wait, sleep
 public/                the entire frontend
 tests/                 integration suites and their runner
 deploy/                systemd unit, nginx vhost, security headers
@@ -279,7 +315,7 @@ run against the same state would collide with the first.
 - [x] Accounts: Argon2id, sessions, masked credential entry
 - [x] A real shell: pipes, `&&`/`||`/`;`, redirection both ways, quoting,
       variables, aliases, globbing, command substitution
-- [x] 76 commands with generated help and man pages
+- [x] 80 commands with generated help and man pages
 - [x] Full-screen editor
 - [x] Mail between accounts
 - [x] Responsive frontend, PWA, mobile layout, server-side narrow-terminal support
@@ -287,8 +323,10 @@ run against the same state would collide with the first.
 - [x] Security audit and remediation; bounded resources throughout
 - [x] Unit tests gating deployment
 - [x] Integration suites in the repo, gating deployment
-- [ ] A process model: background jobs, `jobs`/`fg`/`kill`, a real `ps`
+- [x] A process model: background jobs, `jobs`/`kill`/`wait`, a real `ps`
 - [ ] Scripts stored in the VFS and run from the shell, with arguments
+- [ ] Interrupting a *foreground* command with `^C`, which needs command
+      execution moved off the reader thread
 - [ ] Per-user persistent settings beyond the VFS
 - [ ] `/metrics` for the Prometheus instance already running on the host
 - [ ] A minimal desktop: more than one window over the same session

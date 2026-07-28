@@ -41,6 +41,7 @@ main :: proc() {
 	vfs_init(&g_vfs)
 	auth_init(&g_users)
 	conn_tracker_init(&g_conns)
+	proc_table_init()
 	abuse_init()
 	g_clients = make([dynamic]^Client)
 
@@ -377,8 +378,11 @@ run_terminal_session :: proc(socket: net.TCP_Socket, ip: string) {
 	thread.join(writer)
 	thread.destroy(writer) // the old code never destroyed its threads
 
-	client_destroy(client)
-	free(client)
+	// Background jobs hold their own reference and may still be running, so
+	// the connection releases its reference rather than freeing outright. Ask
+	// them to stop first: nobody is left to read their output.
+	proc_kill_session(client.id)
+	client_unref(client)
 
 	broadcast_notice(fmt.tprintf("\x1b[33m*\x1b[0m %s disconnected\r\n", departed), -1)
 	broadcast_stat()

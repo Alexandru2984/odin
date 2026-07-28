@@ -692,19 +692,6 @@ cmd_free :: proc(ctx: ^Cmd_Ctx, args: []string) {
 	outf(ctx, "Sessions:     %d of %d\n", client_count(), MAX_CLIENTS)
 }
 
-cmd_ps :: proc(ctx: ^Cmd_Ctx, args: []string) {
-	outf(ctx, "\x1b[1m%-6s %-20s %s\x1b[0m\n", "PID", "USER", "COMMAND")
-
-	sync.mutex_lock(&g_clients_lock)
-	for c in g_clients {
-		sync.mutex_lock(&c.state_lock)
-		name := strings.clone(c.name, context.temp_allocator)
-		sync.mutex_unlock(&c.state_lock)
-		outf(ctx, "%s %-20s webos-shell\n", pad_int_left(c.id, 6), name)
-	}
-	sync.mutex_unlock(&g_clients_lock)
-}
-
 cmd_history :: proc(ctx: ^Cmd_Ctx, args: []string) {
 	c := ctx.client
 	if len(c.history) == 0 {

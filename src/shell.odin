@@ -86,6 +86,7 @@ Token_Kind :: enum {
 	Write, // >
 	Append, // >>
 	Read, // <
+	Background, // &
 }
 
 Token :: struct {
@@ -275,10 +276,7 @@ shell_lex :: proc(
 				i += 2
 				continue
 			}
-			// A lone '&' has no meaning here: there is no job control, so
-			// treat it as ordinary text rather than silently dropping it.
-			strings.write_byte(&b, '&')
-			has_word = true
+			append(&result, Token{kind = .Background})
 			i += 1
 			continue
 
@@ -367,16 +365,17 @@ shell_lex :: proc(
 shell_expand :: proc(
 	c: ^Client,
 	text: string,
+	ex: Exec,
 	allocator := context.temp_allocator,
 ) -> (result: string, err: Lex_Error) {
 	b := strings.builder_make(allocator)
-	expand_into(c, &b, text) or_return
+	expand_into(c, &b, text, ex) or_return
 	return strings.to_string(b), .None
 }
 
 // Expands every $VAR in `text` into `b`.
 @(private = "file")
-expand_into :: proc(c: ^Client, b: ^strings.Builder, text: string) -> Lex_Error {
+expand_into :: proc(c: ^Client, b: ^strings.Builder, text: string, ex: Exec) -> Lex_Error {
 	i := 0
 	for i < len(text) {
 		if text[i] == '\\' && i + 1 < len(text) {
@@ -385,7 +384,7 @@ expand_into :: proc(c: ^Client, b: ^strings.Builder, text: string) -> Lex_Error 
 			continue
 		}
 		if text[i] == '$' {
-			consumed := expand_one(c, b, text[i:]) or_return
+			consumed := expand_one(c, b, text[i:], ex) or_return
 			i += consumed
 			continue
 		}
@@ -406,6 +405,7 @@ expand_one :: proc(
 	c: ^Client,
 	b: ^strings.Builder,
 	text: string,
+	ex: Exec,
 ) -> (consumed: int, err: Lex_Error) {
 	if len(text) < 2 {
 		strings.write_byte(b, '$')
@@ -414,7 +414,7 @@ expand_one :: proc(
 
 	// $? is the status of the last command.
 	if text[1] == '?' {
-		fmt.sbprintf(b, "%d", c.last_status)
+		fmt.sbprintf(b, "%d", ex.status^)
 		return 2, .None
 	}
 
@@ -424,7 +424,7 @@ expand_one :: proc(
 		if !ok {
 			return 0, .Unterminated_Substitution
 		}
-		out := shell_capture(c, text[2:end]) or_return
+		out := shell_capture(c, text[2:end], ex) or_return
 		strings.write_string(b, out)
 		if strings.builder_len(b^) > MAX_EXPANSION {
 			return end + 1, .Too_Long
@@ -592,7 +592,81 @@ shell_run :: proc(c: ^Client, line: string) {
 		c.last_status = 2
 		return
 	}
-	run_token_list(c, tokens, nil)
+	if len(tokens) == 0 {
+		return
+	}
+
+	// A trailing '&' sends the line to the background.
+	//
+	// Only trailing: backgrounding one command in the middle of a list means
+	// splitting the line by source position and running the halves
+	// differently, and `sleep 5 &` is what people actually type. Anything else
+	// says so rather than quietly running in the foreground.
+	for tok, i in tokens {
+		if tok.kind != .Background {
+			continue
+		}
+		if i != len(tokens) - 1 {
+			client_send(
+				c,
+				"\x1b[31m'&' is only understood at the end of a line\x1b[0m\r\n",
+			)
+			c.last_status = 2
+			return
+		}
+
+		// The '&' is the last token, so it is also the last non-space byte of
+		// the line: the body is everything before it.
+		body := strings.trim_right_space(line)
+		body = body[:len(body) - 1]
+		if len(strings.trim_space(body)) == 0 {
+			client_send(c, "\x1b[31msyntax error near '&'\x1b[0m\r\n")
+			c.last_status = 2
+			return
+		}
+
+		pid, spawn_err := proc_spawn(c, body)
+		if len(spawn_err) > 0 {
+			client_sendf(c, "\x1b[31m%s\x1b[0m\r\n", spawn_err)
+			c.last_status = 1
+			return
+		}
+		client_sendf(c, "\x1b[90m[%d] started\x1b[0m\r\n", pid)
+		c.last_status = 0
+		return
+	}
+
+	// A foreground line is a process too, so `ps` shows what the machine is
+	// doing and a disconnect can stop work that is still running.
+	pid := proc_begin(
+		c.id,
+		client_get_name(c, context.temp_allocator),
+		sanitize_text(line, 80, context.temp_allocator),
+		false,
+	)
+	run_token_list(c, tokens, Exec{pid = pid, status = &c.last_status})
+	proc_end(pid, c.last_status)
+}
+
+// Runs a line on a background thread, against a snapshot of the session rather
+// than the session itself. Returns the status of the last pipeline.
+shell_run_detached :: proc(c: ^Client, line: string, detached: ^Detached) -> int {
+	tokens, lex_err := shell_lex(line)
+	if lex_err != .None {
+		client_sendf(c, "\x1b[31msyntax error: %s\x1b[0m\r\n", lex_error_string(lex_err))
+		return 2
+	}
+
+	// A detached run keeps its own status: c.last_status belongs to the reader
+	// thread and writing to it from here would be a race, and a visible one —
+	// `$?` would start reporting whatever a background job did last.
+	status := 0
+	run_token_list(
+		c,
+		tokens,
+		Exec{detached = detached, pid = detached.pid, status = &status},
+	)
+	return status
 }
 
 // Runs a command line and returns what it printed instead of showing it.
@@ -603,6 +677,7 @@ shell_run :: proc(c: ^Client, line: string) {
 shell_capture :: proc(
 	c: ^Client,
 	line: string,
+	ex: Exec,
 	allocator := context.temp_allocator,
 ) -> (out: string, err: Lex_Error) {
 	if c.subst_depth >= MAX_SUBST_DEPTH {
@@ -614,7 +689,11 @@ shell_capture :: proc(
 	tokens := shell_lex(line, context.temp_allocator) or_return
 
 	b := strings.builder_make(allocator)
-	run_token_list(c, tokens, &b)
+	// The substitution inherits everything but the output destination: it must
+	// run in the same directory, as the same user, under the same process.
+	inner := ex
+	inner.sink = &b
+	run_token_list(c, tokens, inner)
 
 	// Trailing newlines are dropped, as in every shell: `cd $(pwd)` has to
 	// produce a path, not a path with a line break welded onto the end.
@@ -625,10 +704,22 @@ shell_capture :: proc(
 	return text, .None
 }
 
-// The body of shell_run, shared with shell_capture. `sink` is nil when output
-// belongs on the terminal.
+// What a running line needs to know beyond the client: where its output goes,
+// whose session state it stands in, and which status variable `&&` and `$?`
+// read.
+//
+// It travels as one struct rather than four parameters because every one of
+// them has to reach the expansion pass as well — `$(pwd)` inside a background
+// job has to see the job's directory, not the session's.
+Exec :: struct {
+	sink:     ^strings.Builder, // nil: output goes to the terminal
+	detached: ^Detached,        // nil: use the live session
+	pid:      int,              // owning process, 0 when untracked
+	status:   ^int,             // never &c.last_status from another thread
+}
+
 @(private = "file")
-run_token_list :: proc(c: ^Client, tokens: []Token, sink: ^strings.Builder) {
+run_token_list :: proc(c: ^Client, tokens: []Token, ex: Exec) {
 	if len(tokens) == 0 {
 		return
 	}
@@ -650,11 +741,11 @@ run_token_list :: proc(c: ^Client, tokens: []Token, sink: ^strings.Builder) {
 		if len(segment) > 0 {
 			should_run :=
 				join == .Always ||
-				(join == .On_Success && c.last_status == 0) ||
-				(join == .On_Failure && c.last_status != 0)
+				(join == .On_Success && ex.status^ == 0) ||
+				(join == .On_Failure && ex.status^ != 0)
 
 			if should_run {
-				run_pipeline(c, segment, sink)
+				run_pipeline(c, segment, ex)
 			}
 
 			executed += 1
@@ -675,7 +766,7 @@ run_token_list :: proc(c: ^Client, tokens: []Token, sink: ^strings.Builder) {
 			join = .On_Failure
 		case .Semi:
 			join = .Always
-		case .Word, .Pipe, .Write, .Append, .Read:
+		case .Word, .Pipe, .Write, .Append, .Read, .Background:
 			unreachable()
 		}
 		start = i + 1
@@ -685,7 +776,7 @@ run_token_list :: proc(c: ^Client, tokens: []Token, sink: ^strings.Builder) {
 // Executes one pipeline: a series of stages separated by '|', with an optional
 // redirection on the end.
 @(private = "file")
-run_pipeline :: proc(c: ^Client, tokens: []Token, sink: ^strings.Builder) {
+run_pipeline :: proc(c: ^Client, tokens: []Token, ex: Exec) {
 	stages := make([dynamic]Stage, context.temp_allocator)
 	current := make([dynamic]string, context.temp_allocator)
 
@@ -699,7 +790,7 @@ run_pipeline :: proc(c: ^Client, tokens: []Token, sink: ^strings.Builder) {
 		case .Word:
 			// Expanded here, immediately before this pipeline runs, so that
 			// `$?` and any variable a previous command set are current.
-			word, xerr := shell_expand(c, tokens[i].text)
+			word, xerr := shell_expand(c, tokens[i].text, ex)
 			if xerr != .None {
 				client_sendf(c, "\x1b[31m%s\x1b[0m\r\n", lex_error_string(xerr))
 				c.last_status = 2
@@ -734,7 +825,7 @@ run_pipeline :: proc(c: ^Client, tokens: []Token, sink: ^strings.Builder) {
 				c.last_status = 2
 				return
 			}
-			target, xerr := shell_expand(c, tokens[i + 1].text)
+			target, xerr := shell_expand(c, tokens[i + 1].text, ex)
 			if xerr != .None {
 				client_sendf(c, "\x1b[31m%s\x1b[0m\r\n", lex_error_string(xerr))
 				c.last_status = 2
@@ -750,7 +841,7 @@ run_pipeline :: proc(c: ^Client, tokens: []Token, sink: ^strings.Builder) {
 				c.last_status = 2
 				return
 			}
-			source, xerr := shell_expand(c, tokens[i + 1].text)
+			source, xerr := shell_expand(c, tokens[i + 1].text, ex)
 			if xerr != .None {
 				client_sendf(c, "\x1b[31m%s\x1b[0m\r\n", lex_error_string(xerr))
 				c.last_status = 2
@@ -759,8 +850,10 @@ run_pipeline :: proc(c: ^Client, tokens: []Token, sink: ^strings.Builder) {
 			read_from = source
 			i += 2
 
-		case .Semi, .And, .Or:
-			unreachable() // consumed by shell_run
+		case .Semi, .And, .Or, .Background:
+			// Separators are consumed by run_token_list, and a '&' that reached
+			// this far would have been rejected by shell_run.
+			unreachable()
 		}
 	}
 
@@ -799,11 +892,21 @@ run_pipeline :: proc(c: ^Client, tokens: []Token, sink: ^strings.Builder) {
 
 	for stage, index in stages {
 		is_last := index == len(stages) - 1
-		capture_output := !is_last || len(redirect) > 0 || sink != nil
+		capture_output := !is_last || len(redirect) > 0 || ex.sink != nil
 
+		// Resolved per stage rather than once per line: `cd /tmp ; ls` has to
+		// see the new directory, and a stage that changes it must not change
+		// the one its neighbours already captured.
 		ctx := Cmd_Ctx {
-			client = c,
-			stdin  = piped_input,
+			client  = c,
+			stdin   = piped_input,
+			cwd     = ex.detached != nil \
+			? ex.detached.cwd \
+			: client_get_cwd(c, context.temp_allocator),
+			user    = ex.detached != nil \
+			? ex.detached.user \
+			: client_get_user(c, context.temp_allocator),
+			proc_id = ex.pid,
 		}
 
 		builder: strings.Builder
@@ -812,7 +915,7 @@ run_pipeline :: proc(c: ^Client, tokens: []Token, sink: ^strings.Builder) {
 			ctx.capture = &builder
 		}
 
-		if !run_stage(c, &ctx, stage.args) {
+		if !run_stage(c, &ctx, stage.args, ex) {
 			c.last_status = 127
 			return
 		}
@@ -829,13 +932,13 @@ run_pipeline :: proc(c: ^Client, tokens: []Token, sink: ^strings.Builder) {
 		}
 	}
 
-	c.last_status = status
+	ex.status^ = status
 
 	// Inside a substitution the output is the value, not something to print.
 	// A redirection still wins over it: `$(echo hi > f)` writes the file and
 	// expands to nothing, which is what a shell does.
-	if sink != nil && len(redirect) == 0 {
-		strings.write_string(sink, piped_input)
+	if ex.sink != nil && len(redirect) == 0 {
+		strings.write_string(ex.sink, piped_input)
 		return
 	}
 
@@ -851,7 +954,7 @@ run_pipeline :: proc(c: ^Client, tokens: []Token, sink: ^strings.Builder) {
 
 // Looks up and invokes one command. Returns false if there is no such command.
 @(private = "file")
-run_stage :: proc(c: ^Client, ctx: ^Cmd_Ctx, args: []string) -> bool {
+run_stage :: proc(c: ^Client, ctx: ^Cmd_Ctx, args: []string, ex: Exec) -> bool {
 	if len(args) == 0 {
 		return true
 	}
@@ -879,6 +982,23 @@ run_stage :: proc(c: ^Client, ctx: ^Cmd_Ctx, args: []string) -> bool {
 	}
 
 	name := strings.to_lower(effective[0], context.temp_allocator)
+
+	// A detached job may not touch session state. See SESSION_COMMANDS for why
+	// refusing beats either racing on it or silently doing nothing.
+	if ex.detached != nil && is_session_command(name) {
+		errf(
+			ctx,
+			"%s: cannot run in the background — it changes the session\n",
+			name,
+		)
+		return true
+	}
+
+	// A cancelled process stops between stages even when the command it is
+	// running never checks for itself.
+	if proc_cancelled(ex.pid) {
+		return true
+	}
 
 	// An alias can never shadow a built-in — cmd_alias refuses those names — so
 	// a user cannot redefine `rm` into something surprising and then forget.
