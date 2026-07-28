@@ -433,6 +433,49 @@ several sessions see it at once, and every command end to end are covered.
 server, because they create accounts and files under fixed names and a second
 run against the same state would collide with the first.
 
+### Fuzzing
+
+Every parser here reads bytes an anonymous peer chose, so both layers get
+fuzzed and both run on every deploy.
+
+`src/fuzz_test.odin` drives each parser directly: the WebSocket frame decoder,
+the HTTP request head, percent-decoding, static path resolution, the shell
+lexer, path resolution, sanitisation, the glob matcher and the control channel.
+The generator is a fixed-seed PRNG written out in full rather than
+`core:math/rand`, so a failure reproduces exactly — the seed and the iteration
+number are the whole state.
+
+Crashes are the easy half. Bounds checking stays on in release builds precisely
+so an out-of-range read is a panic the runner catches, but a parser can also
+return perfectly calmly and hand back a path that escapes the document root.
+So each target asserts an invariant: resolved paths stay under `public/` and
+never contain `..`; `vfs_resolve_path` always returns an absolute path with no
+parent references left; sanitised text never contains a control byte; a frame's
+payload never claims more bytes than the frame consumed; the reported terminal
+size stays inside the clamp whatever arrives.
+
+Each target also asserts **how often it gets in**. That check exists because
+the first version did not have it: byte-level mutation of a WebSocket frame
+produced something the parser accepted 15 times out of 3000, because bit flips
+land on the reserved bits or the mask bit and are rejected in the first few
+lines. The fuzzer was passing while testing almost nothing, and passing is
+exactly what it would keep doing. A structure-aware generator — build a valid
+frame from randomised fields, then corrupt a little — took that to around 580,
+and the assertion now fails the build if it ever collapses back.
+
+`tests/test_fuzz.py` covers what the in-process fuzzers structurally cannot:
+the read loop, reassembly across reads, the handshake, and the connection
+lifecycle around them. It also checks reassembly is *correct* rather than
+merely survivable — a command split across frames with a ping interleaved has
+to arrive as one command.
+
+It is modest by default because almost all its wall clock is waiting on
+sockets rather than working. A real hunt is an environment variable away:
+
+```sh
+FUZZ_ROUNDS=5000 FUZZ_TIMEOUT=0.2 FUZZ_SEED=7 python3 tests/test_fuzz.py
+```
+
 `tests/browser/` holds Playwright checks for the desktop, on a desktop and a
 phone viewport. They are deliberately **not** part of `make deploy`: they need
 a browser the deployment host is not required to have. Run them by hand when
@@ -452,6 +495,7 @@ the front end changes — they are also how the layout screenshots get taken.
 - [x] Binary control channel
 - [x] Security audit and remediation; bounded resources throughout
 - [x] Unit tests gating deployment
+- [x] Fuzzing, in-process and over a socket, with coverage assertions
 - [x] Integration suites in the repo, gating deployment
 - [x] A process model: background jobs, `jobs`/`kill`/`wait`, a real `ps`
 - [x] Scripts stored in the VFS, with arguments and control flow
