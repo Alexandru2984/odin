@@ -6,6 +6,7 @@ import "core:slice"
 import "core:strings"
 import "core:sync"
 import "core:time"
+import "core:unicode/utf8"
 
 // ---------------------------------------------------------------------------
 // Out-of-band control channel
@@ -806,12 +807,25 @@ cmd_clearall :: proc(ctx: ^Cmd_Ctx, args: []string) {
 }
 
 cmd_banner :: proc(ctx: ^Cmd_Ctx, args: []string) {
-	if len(args) == 0 {
+	// Same rule as cowsay: arguments first, then a pipe. Twenty characters is
+	// already wider than most terminals at five rows a letter, so only the
+	// first line of piped input is used.
+	source := ""
+	switch {
+	case len(args) > 0:
+		source = join_args(args)
+	case len(ctx.stdin) > 0:
+		if lines := input_lines(ctx.stdin); len(lines) > 0 {
+			source = lines[0]
+		}
+	}
+
+	if len(strings.trim_space(source)) == 0 {
 		errf(ctx, "banner: usage: banner <text>\n")
 		return
 	}
 
-	text := sanitize_text(join_args(args), 20, context.temp_allocator)
+	text := sanitize_text(source, 20, context.temp_allocator)
 	upper := strings.to_upper(text, context.temp_allocator)
 
 	// Five-row block font, rendered one row at a time across all characters.
@@ -881,10 +895,26 @@ banner_row :: proc(ch: rune, row: int) -> string {
 }
 
 cmd_cowsay :: proc(ctx: ^Cmd_Ctx, args: []string) {
-	text := len(args) > 0 ? join_args(args) : "moo"
-	msg := sanitize_text(text, 200, context.temp_allocator)
+	// A filter as well as a command: `fortune | cowsay` is the whole reason
+	// anyone has ever run cowsay, so piped input counts as the message.
+	// Arguments win over stdin, and "moo" is only for the bare invocation.
+	text := "moo"
+	switch {
+	case len(args) > 0:
+		text = join_args(args)
+	case len(ctx.stdin) > 0:
+		// The bubble is one line, so a multi-line pipe folds into one.
+		text = strings.join(input_lines(ctx.stdin), " ", context.temp_allocator)
+	}
 
-	bar := strings.repeat("-", len(msg) + 2, context.temp_allocator)
+	msg := sanitize_text(text, 200, context.temp_allocator)
+	if len(msg) == 0 {
+		msg = "..."
+	}
+
+	// Rune count, not byte length: a byte-sized bar is too long under any
+	// non-ASCII text and the bubble stops lining up.
+	bar := strings.repeat("-", utf8.rune_count_in_string(msg) + 2, context.temp_allocator)
 	outf(ctx, " %s\n", bar)
 	outf(ctx, "< %s >\n", msg)
 	outf(ctx, " %s\n", bar)

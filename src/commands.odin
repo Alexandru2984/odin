@@ -660,7 +660,11 @@ cmd_grep :: proc(ctx: ^Cmd_Ctx, args: []string) {
 	ignore_case := false
 	invert := false
 	count_only := false
-	numbered := true
+
+	// Off by default, like the real grep. It used to be on, which meant every
+	// use of grep in the middle of a pipe fed line numbers to the next stage:
+	// `ls | grep foo | sort` sorted "1: foo" rather than "foo".
+	numbered := false
 
 	rest := make([dynamic]string, context.temp_allocator)
 	for a in args {
@@ -673,6 +677,8 @@ cmd_grep :: proc(ctx: ^Cmd_Ctx, args: []string) {
 					invert = true
 				case 'c':
 					count_only = true
+				case 'n':
+					numbered = true
 				case 'h':
 					numbered = false
 				}
@@ -683,7 +689,7 @@ cmd_grep :: proc(ctx: ^Cmd_Ctx, args: []string) {
 	}
 
 	if len(rest) == 0 {
-		errf(ctx, "grep: usage: grep [-i] [-v] [-c] <pattern> [file...]\n")
+		errf(ctx, "grep: usage: grep [-i] [-v] [-c] [-n] <pattern> [file...]\n")
 		return
 	}
 
@@ -749,6 +755,17 @@ head_tail :: proc(ctx: ^Cmd_Ctx, args: []string, from_start: bool) {
 			i += 2
 			continue
 		}
+
+		// `head -3`, the short form everyone actually types. Without this the
+		// argument falls through to `target` and is looked up as a filename.
+		if len(args[i]) > 1 && args[i][0] == '-' {
+			if n, ok := parse_positive_int(args[i][1:]); ok {
+				count = min(n, MAX_OUTPUT_LINES)
+				i += 1
+				continue
+			}
+		}
+
 		target = args[i]
 		i += 1
 	}

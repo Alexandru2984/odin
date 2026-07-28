@@ -245,7 +245,8 @@ day_of_week :: proc(year: int, month: int, day: int) -> int {
 	return (h + 5) % 7
 }
 
-@(private = "file")
+// Package-visible rather than file-private so the tests can exercise the leap
+// year rule directly; it is pure arithmetic with no other caller.
 days_in_month :: proc(year: int, month: int) -> int {
 	switch month {
 	case 1, 3, 5, 7, 8, 10, 12:
