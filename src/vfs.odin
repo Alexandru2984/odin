@@ -244,6 +244,13 @@ can_read_entry :: proc(e: VFS_Entry, user: string) -> bool {
 	return len(user) > 0 && e.owner == user
 }
 
+// Package-visible so the glob scan can apply exactly the visibility rule `ls`
+// applies, rather than reimplementing it beside this one and drifting. The
+// caller is expected to already hold the VFS lock.
+vfs_entry_visible :: proc(e: VFS_Entry, user: string) -> bool {
+	return can_read_entry(e, user)
+}
+
 @(private = "file")
 can_write_entry :: proc(e: VFS_Entry, user: string) -> bool {
 	switch e.perm {

@@ -236,20 +236,91 @@ cmd_ls :: proc(ctx: ^Cmd_Ctx, args: []string) {
 			append(&targets, a)
 		}
 	}
-	_ = all
-
-	dir := client_get_cwd(ctx.client, context.temp_allocator)
-	if len(targets) > 0 {
-		dir = resolve_arg(ctx.client, targets[0])
-	}
-
 	user := client_get_user(ctx.client, context.temp_allocator)
 
+	// More than one target is now the common case, not an exotic one: a glob
+	// hands `ls` every match at once, and `ls *.txt` has to list the files
+	// rather than complain that the first one is not a directory.
+	if len(targets) == 0 {
+		cwd := client_get_cwd(ctx.client, context.temp_allocator)
+		ls_directory(ctx, cwd, user, long, all, false)
+		return
+	}
+
+	// Files are listed together first and directories expanded after, the way
+	// every ls does it.
+	files := make([dynamic]VFS_Stat, context.temp_allocator)
+	dirs := make([dynamic]string, context.temp_allocator)
+
+	for t in targets {
+		abs := resolve_arg(ctx.client, t)
+		if vfs_is_dir(&g_vfs, abs) {
+			append(&dirs, abs)
+			continue
+		}
+		st, ok := vfs_stat(&g_vfs, abs, user, context.temp_allocator)
+		if !ok {
+			errf(ctx, "ls: %s: %s\n", t, vfs_error_string(.Not_Found))
+			continue
+		}
+		// Displayed as written rather than resolved: `ls sub/a.txt` should say
+		// `sub/a.txt`, not the absolute path.
+		st.name = strings.clone(t, context.temp_allocator)
+		append(&files, st)
+	}
+
+	if len(files) > 0 {
+		ls_render(ctx, files[:], long)
+	}
+
+	// A header only earns its place when there is more than one thing to tell
+	// apart.
+	headers := len(dirs) > 1 || (len(dirs) == 1 && len(files) > 0)
+	for d, i in dirs {
+		if headers && (i > 0 || len(files) > 0) {
+			out(ctx, "\n")
+		}
+		ls_directory(ctx, d, user, long, all, headers)
+	}
+}
+
+// Lists one directory, optionally introduced by its own name.
+@(private = "file")
+ls_directory :: proc(
+	ctx: ^Cmd_Ctx,
+	dir: string,
+	user: string,
+	long: bool,
+	all: bool,
+	header: bool,
+) {
 	entries, err := vfs_list(&g_vfs, dir, user, context.temp_allocator)
 	if err != .None {
 		errf(ctx, "ls: %s: %s\n", dir, vfs_error_string(err))
 		return
 	}
+
+	if header {
+		outf(ctx, "%s:\n", dir)
+	}
+
+	// Dotfiles are hidden without -a. The flag was parsed and then discarded
+	// before, so `ls -a` was documented but did nothing.
+	if !all {
+		visible := make([dynamic]VFS_Stat, context.temp_allocator)
+		for e in entries {
+			if !strings.has_prefix(e.name, ".") {
+				append(&visible, e)
+			}
+		}
+		entries = visible[:]
+	}
+
+	ls_render(ctx, entries, long)
+}
+
+@(private = "file")
+ls_render :: proc(ctx: ^Cmd_Ctx, entries: []VFS_Stat, long: bool) {
 
 	slice.sort_by(entries, proc(a, b: VFS_Stat) -> bool {
 		// Directories first, then alphabetical.
@@ -792,16 +863,71 @@ head_tail :: proc(ctx: ^Cmd_Ctx, args: []string, from_start: bool) {
 }
 
 cmd_wc :: proc(ctx: ^Cmd_Ctx, args: []string) {
-	content, ok := gather_input(ctx, "wc", args)
+	// Selecting a single count is most of what wc is used for — `wc -l` is how
+	// anyone counts lines, and without the flags it was being read as a
+	// filename and reported as missing.
+	want_lines, want_words, want_bytes := false, false, false
+
+	files := make([dynamic]string, context.temp_allocator)
+	for a in args {
+		if len(a) > 1 && a[0] == '-' {
+			for i in 1 ..< len(a) {
+				switch a[i] {
+				case 'l':
+					want_lines = true
+				case 'w':
+					want_words = true
+				case 'c', 'm':
+					want_bytes = true
+				}
+			}
+			continue
+		}
+		append(&files, a)
+	}
+
+	// No selection means all three, as in the real thing.
+	if !want_lines && !want_words && !want_bytes {
+		want_lines, want_words, want_bytes = true, true, true
+	}
+
+	content, ok := gather_input(ctx, "wc", files[:])
 	if !ok {
 		return
 	}
 
 	lines := len(input_lines(content))
 	words := len(strings.fields(content, context.temp_allocator))
-	label := len(args) == 1 ? args[0] : ""
+	label := len(files) == 1 ? files[0] : ""
 
-	outf(ctx, "%s %s %s  %s\n", pad_int(lines, 8), pad_int(words, 8), pad_int(len(content), 8), label)
+	// A single count prints bare, so it can be used as a number. Anything else
+	// stays in the aligned columns.
+	selected := 0
+	if want_lines {selected += 1}
+	if want_words {selected += 1}
+	if want_bytes {selected += 1}
+
+	if selected == 1 {
+		n := want_lines ? lines : (want_words ? words : len(content))
+		if len(label) > 0 {
+			outf(ctx, "%d %s\n", n, label)
+		} else {
+			outf(ctx, "%d\n", n)
+		}
+		return
+	}
+
+	b := strings.builder_make(context.temp_allocator)
+	if want_lines {
+		strings.write_string(&b, pad_int(lines, 8))
+	}
+	if want_words {
+		strings.write_string(&b, pad_int(words, 8))
+	}
+	if want_bytes {
+		strings.write_string(&b, pad_int(len(content), 8))
+	}
+	outf(ctx, "%s  %s\n", strings.to_string(b), label)
 }
 
 cmd_du :: proc(ctx: ^Cmd_Ctx, args: []string) {

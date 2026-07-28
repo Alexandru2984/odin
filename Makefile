@@ -10,7 +10,7 @@ SERVICE := webos
 RELEASE_FLAGS := -o:speed -vet -strict-style
 DEBUG_FLAGS   := -o:none -debug -vet -strict-style
 
-.PHONY: all build debug run test check clean install-service deploy fmt
+.PHONY: all build debug run test test-integration check clean install-service deploy fmt
 
 all: build
 
@@ -30,6 +30,11 @@ check:
 test:
 	$(ODIN) test $(SRC)
 
+# Drives a real WebSocket client against a private instance on its own port
+# and data directory. Needs a build first; never touches the live service.
+test-integration: build
+	./tests/run.sh
+
 run: build
 	./$(OUT)
 
@@ -48,7 +53,10 @@ install-service:
 	@echo "service files installed"
 
 # Build, then swap the binary and restart. Keeps a rollback copy.
-deploy: build test
+#
+# Both test layers gate the restart: the unit tests catch the pure logic, the
+# integration suites catch everything that only breaks once there is a socket.
+deploy: build test test-integration
 	@cp -f $(OUT) bin/webos_server.prev 2>/dev/null || true
 	sudo systemctl restart $(SERVICE)
 	@sleep 1

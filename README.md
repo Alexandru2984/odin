@@ -30,18 +30,19 @@ exit was 1
 ## Running it
 
 ```sh
-make build     # release binary -> bin/webos_server
-make check     # type-check only, no binary
-make test      # unit tests
-make run       # build and run in the foreground
-make deploy    # build + test, then restart the systemd service
+make build             # release binary -> bin/webos_server
+make check             # type-check only, no binary
+make test              # unit tests
+make test-integration  # real client against a private server instance
+make run               # build and run in the foreground
+make deploy            # build + both test layers, then restart the service
 ```
 
 Odin `dev-2026-07` or newer. Nothing else — no package manager, no node_modules,
 no build step for the frontend.
 
-`make deploy` runs the tests first and refuses to restart the service if they
-fail, so the test suite is the last gate before production.
+`make deploy` runs both test layers first and refuses to restart the service if
+either fails, so the tests are the last gate before production.
 
 ### Configuration
 
@@ -74,7 +75,9 @@ Not a command dispatcher. A small but real shell language, in `src/shell.odin`:
 
 - **pipelines** — `cat file | grep x | sort | uniq -c | head`
 - **operators** — `a && b`, `a || b`, `a ; b`
-- **redirection** — `> file`, `>> file`
+- **redirection** — `> file`, `>> file`, `< file`
+- **globbing** — `*.txt`, `note?`, `file[0-9]`, `/home/*/mail`
+- **command substitution** — `cd $(pwd)`, `echo "today is $(date)"`
 - **quoting** — single quotes are literal, double quotes group and expand
 - **variables** — `export NAME=value`, `$NAME`, `${NAME}`, `$?`, `$USER`, `$PWD`
 - **aliases** — `alias ll='ls -l'`, `unalias ll`
@@ -84,9 +87,16 @@ design decision rather than an implementation detail: expanding during the lex
 would evaluate the whole line up front, so in `false ; echo $?` the `$?` would
 be substituted before `false` had ever run.
 
+Globbing runs after variable expansion, so `ls $DIR/*` works. A pattern that
+matches nothing is left alone rather than erased — `rm *.bak` with no backups
+must fail with "no such file", not quietly become a bare `rm`. Quoting suppresses
+it, `*` never crosses a `/`, and a leading dot has to be asked for by name, so
+`rm *` cannot take the dotfiles with it.
+
 Every dimension is bounded — 16 pipeline stages, 32 commands in a list, 64
-variables, 4 KiB per value, 16 KiB of total expansion. A shell that grows a
-buffer on user input is a denial-of-service primitive.
+variables, 4 KiB per value, 16 KiB of total expansion, 4 levels of `$( )`
+nesting, 512 results from one glob. A shell that grows a buffer on user input
+is a denial-of-service primitive.
 
 ### 76 commands
 
@@ -233,7 +243,9 @@ src/
   config.odin          every limit, in one place
   log.odin             structured logging and abuse aggregation
   text.odin            sanitisation and formatting helpers
+  glob.odin            pattern matching and the glob scan
 public/                the entire frontend
+tests/                 integration suites and their runner
 deploy/                systemd unit, nginx vhost, security headers
 data/                  snapshots (created at runtime, 0600)
 ```
@@ -243,22 +255,30 @@ a comment explaining what goes wrong without it.
 
 ## Testing
 
+Two layers, both gating `make deploy`.
+
 `make test` runs the unit tests in `src/webos_test.odin` — path validation and
 path-escape resistance, control-character sanitisation, username rules, history
-redaction, shell lexing (quoting, deferred expansion, operators), control-frame
-parsing with clamping, formatting, calendar arithmetic. They cover the pure
-logic where a mistake is silent rather than obvious, and where a bug is a
-security bug rather than a cosmetic one.
+redaction, shell lexing (quoting, deferred expansion, operators, substitutions),
+glob matching, control-frame parsing with clamping, formatting, calendar
+arithmetic. They cover the pure logic where a mistake is silent rather than
+obvious, and where a bug is a security bug rather than a cosmetic one.
 
-Anything needing a live socket is covered separately by integration suites that
-drive a real WebSocket client against a real server.
+`make test-integration` runs the suites in `tests/`, which drive a real
+WebSocket client against a private server instance on its own port and data
+directory. That is where the framing, the connection lifecycle, the VFS as
+several sessions see it at once, and every command end to end are covered.
+`./tests/run.sh shell` runs one suite. Each suite gets a freshly started
+server, because they create accounts and files under fixed names and a second
+run against the same state would collide with the first.
 
 ## Status
 
 - [x] HTTP/1.1 and WebSocket server, written from scratch
 - [x] In-memory VFS with permissions, quotas and disk snapshots
 - [x] Accounts: Argon2id, sessions, masked credential entry
-- [x] A real shell: pipes, `&&`/`||`/`;`, redirection, quoting, variables, aliases
+- [x] A real shell: pipes, `&&`/`||`/`;`, redirection both ways, quoting,
+      variables, aliases, globbing, command substitution
 - [x] 76 commands with generated help and man pages
 - [x] Full-screen editor
 - [x] Mail between accounts
@@ -266,5 +286,9 @@ drive a real WebSocket client against a real server.
 - [x] Binary control channel
 - [x] Security audit and remediation; bounded resources throughout
 - [x] Unit tests gating deployment
+- [x] Integration suites in the repo, gating deployment
+- [ ] A process model: background jobs, `jobs`/`fg`/`kill`, a real `ps`
+- [ ] Scripts stored in the VFS and run from the shell, with arguments
 - [ ] Per-user persistent settings beyond the VFS
-- [ ] A scripting file format (`.sh`-alike) executable from the VFS
+- [ ] `/metrics` for the Prometheus instance already running on the host
+- [ ] A minimal desktop: more than one window over the same session

@@ -14,14 +14,33 @@ flush_word :: proc(
 	result: ^[dynamic]Token,
 	b: ^strings.Builder,
 	has_word: ^bool,
+	literal_glob: ^bool,
 	allocator: runtime.Allocator,
 ) {
 	if !has_word^ {
 		return
 	}
-	append(result, Token{kind = .Word, text = strings.clone(strings.to_string(b^), allocator)})
+	append(
+		result,
+		Token {
+			kind = .Word,
+			text = strings.clone(strings.to_string(b^), allocator),
+			literal_glob = literal_glob^,
+		},
+	)
 	strings.builder_reset(b)
 	has_word^ = false
+	literal_glob^ = false
+}
+
+// Whether a quoted region contains anything the glob pass would act on.
+//
+// Only quoted *magic* disables globbing for the word, so `"*.txt"` is a
+// literal filename while `"notes"*` still expands. Setting the flag for every
+// quoted word would make the second case stop working for no reason.
+@(private = "file")
+region_has_glob_magic :: proc(s: string) -> bool {
+	return has_glob_magic(s)
 }
 
 // ---------------------------------------------------------------------------
@@ -48,6 +67,12 @@ MAX_VAR_NAME        :: 64
 MAX_VAR_VALUE       :: 4096
 MAX_EXPANSION       :: 16 * 1024
 
+// How deep `$( $( ... ) )` may nest. Each level is a live recursion through
+// the executor, so this is a stack bound as much as a sanity one — and an
+// alias whose body substitutes itself would otherwise recurse until the
+// thread died.
+MAX_SUBST_DEPTH :: 4
+
 // ---------------------------------------------------------------------------
 // Lexing
 // ---------------------------------------------------------------------------
@@ -60,18 +85,27 @@ Token_Kind :: enum {
 	Semi, // ;
 	Write, // >
 	Append, // >>
+	Read, // <
 }
 
 Token :: struct {
 	kind: Token_Kind,
 	text: string, // for Word: quoting resolved, expansion still pending
+	// Set when a quoted part of the word contained a glob metacharacter, which
+	// makes the whole word a literal name. Quoting has to survive into the glob
+	// pass somehow, and the alternative — escaping the metacharacters and
+	// unescaping them afterwards — means the escape has to pass through
+	// variable expansion and path resolution intact, which it cannot.
+	literal_glob: bool,
 }
 
 Lex_Error :: enum {
 	None,
 	Unterminated_Quote,
+	Unterminated_Substitution,
 	Too_Many_Tokens,
 	Too_Long,
+	Too_Deep,
 }
 
 lex_error_string :: proc(e: Lex_Error) -> string {
@@ -80,12 +114,56 @@ lex_error_string :: proc(e: Lex_Error) -> string {
 		return "ok"
 	case .Unterminated_Quote:
 		return "unterminated quote"
+	case .Unterminated_Substitution:
+		return "unterminated $( )"
 	case .Too_Many_Tokens:
 		return "too many arguments"
 	case .Too_Long:
 		return "expansion too large"
+	case .Too_Deep:
+		return "command substitution nested too deeply"
 	}
 	return "syntax error"
+}
+
+// Finds the ')' closing the '(' at `open`, counting nested pairs and skipping
+// quoted regions so that `$(echo "a)b")` and `$(echo $(date))` both survive.
+@(private = "file")
+find_subst_end :: proc(line: string, open: int) -> (end: int, ok: bool) {
+	depth := 0
+	i := open
+
+	for i < len(line) {
+		switch line[i] {
+		case '\\':
+			i += 2
+			continue
+		case '\'', '"':
+			quote := line[i]
+			i += 1
+			for i < len(line) && line[i] != quote {
+				// A backslash escape inside double quotes; single quotes have
+				// none, but skipping one there only ever skips a literal
+				// backslash, which cannot be the closing quote anyway.
+				if line[i] == '\\' && quote == '"' {
+					i += 1
+				}
+				i += 1
+			}
+			if i >= len(line) {
+				return 0, false
+			}
+		case '(':
+			depth += 1
+		case ')':
+			depth -= 1
+			if depth == 0 {
+				return i, true
+			}
+		}
+		i += 1
+	}
+	return 0, false
 }
 
 // Splits a line into tokens, resolving quotes but *not* expanding variables.
@@ -106,6 +184,7 @@ shell_lex :: proc(
 
 	b := strings.builder_make(allocator)
 	has_word := false // distinguishes an empty quoted string from no word
+	literal_glob := false // a quoted '*' is a filename, not a pattern
 
 	i := 0
 	for i < len(line) {
@@ -113,7 +192,7 @@ shell_lex :: proc(
 
 		switch ch {
 		case ' ', '\t':
-			flush_word(&result, &b, &has_word, allocator)
+			flush_word(&result, &b, &has_word, &literal_glob, allocator)
 			i += 1
 			continue
 
@@ -129,6 +208,9 @@ shell_lex :: proc(
 					strings.write_byte(&b, '\\')
 				}
 				strings.write_byte(&b, line[j])
+			}
+			if region_has_glob_magic(line[i + 1:i + 1 + end]) {
+				literal_glob = true
 			}
 			has_word = true
 			i += end + 2
@@ -155,6 +237,9 @@ shell_lex :: proc(
 			// Copied verbatim: variables inside double quotes do expand, and
 			// any backslash escape is resolved by the same later pass.
 			strings.write_string(&b, line[i + 1:j])
+			if region_has_glob_magic(line[i + 1:j]) {
+				literal_glob = true
+			}
 			has_word = true
 			i = j + 1
 			continue
@@ -173,7 +258,7 @@ shell_lex :: proc(
 			continue
 
 		case '|':
-			flush_word(&result, &b, &has_word, allocator)
+			flush_word(&result, &b, &has_word, &literal_glob, allocator)
 			if i + 1 < len(line) && line[i + 1] == '|' {
 				append(&result, Token{kind = .Or})
 				i += 2
@@ -184,7 +269,7 @@ shell_lex :: proc(
 			continue
 
 		case '&':
-			flush_word(&result, &b, &has_word, allocator)
+			flush_word(&result, &b, &has_word, &literal_glob, allocator)
 			if i + 1 < len(line) && line[i + 1] == '&' {
 				append(&result, Token{kind = .And})
 				i += 2
@@ -198,13 +283,13 @@ shell_lex :: proc(
 			continue
 
 		case ';':
-			flush_word(&result, &b, &has_word, allocator)
+			flush_word(&result, &b, &has_word, &literal_glob, allocator)
 			append(&result, Token{kind = .Semi})
 			i += 1
 			continue
 
 		case '>':
-			flush_word(&result, &b, &has_word, allocator)
+			flush_word(&result, &b, &has_word, &literal_glob, allocator)
 			if i + 1 < len(line) && line[i + 1] == '>' {
 				append(&result, Token{kind = .Append})
 				i += 2
@@ -214,10 +299,37 @@ shell_lex :: proc(
 			}
 			continue
 
+		case '<':
+			flush_word(&result, &b, &has_word, &literal_glob, allocator)
+			append(&result, Token{kind = .Read})
+			i += 1
+			continue
+
+		case '$':
+			// `$(...)` is copied through as one opaque unit. It cannot be
+			// tokenised here: the text inside is a command line of its own, and
+			// letting the lexer see its pipes and semicolons would tear it into
+			// pieces of the outer line. Expansion runs it later, when there is a
+			// client to run it against.
+			if i + 1 < len(line) && line[i + 1] == '(' {
+				end, ok := find_subst_end(line, i + 1)
+				if !ok {
+					return nil, .Unterminated_Substitution
+				}
+				strings.write_string(&b, line[i:end + 1])
+				has_word = true
+				i = end + 1
+				continue
+			}
+			strings.write_byte(&b, ch)
+			has_word = true
+			i += 1
+			continue
+
 		case '#':
 			// Comment to end of line, but only when it starts a word.
 			if !has_word {
-				flush_word(&result, &b, &has_word, allocator)
+				flush_word(&result, &b, &has_word, &literal_glob, allocator)
 				i = len(line)
 				continue
 			}
@@ -239,7 +351,7 @@ shell_lex :: proc(
 		}
 	}
 
-	flush_word(&result, &b, &has_word, allocator)
+	flush_word(&result, &b, &has_word, &literal_glob, allocator)
 
 	if len(result) > MAX_ARGS {
 		return nil, .Too_Many_Tokens
@@ -304,6 +416,20 @@ expand_one :: proc(
 	if text[1] == '?' {
 		fmt.sbprintf(b, "%d", c.last_status)
 		return 2, .None
+	}
+
+	// $(command) runs the command and substitutes its output.
+	if text[1] == '(' {
+		end, ok := find_subst_end(text, 1)
+		if !ok {
+			return 0, .Unterminated_Substitution
+		}
+		out := shell_capture(c, text[2:end]) or_return
+		strings.write_string(b, out)
+		if strings.builder_len(b^) > MAX_EXPANSION {
+			return end + 1, .Too_Long
+		}
+		return end + 1, .None
 	}
 
 	name: string
@@ -466,6 +592,43 @@ shell_run :: proc(c: ^Client, line: string) {
 		c.last_status = 2
 		return
 	}
+	run_token_list(c, tokens, nil)
+}
+
+// Runs a command line and returns what it printed instead of showing it.
+//
+// This is `$(...)`. Errors still reach the terminal — a substitution that fails
+// should say so rather than silently expanding to nothing — but ordinary output
+// becomes the value of the expansion.
+shell_capture :: proc(
+	c: ^Client,
+	line: string,
+	allocator := context.temp_allocator,
+) -> (out: string, err: Lex_Error) {
+	if c.subst_depth >= MAX_SUBST_DEPTH {
+		return "", .Too_Deep
+	}
+	c.subst_depth += 1
+	defer c.subst_depth -= 1
+
+	tokens := shell_lex(line, context.temp_allocator) or_return
+
+	b := strings.builder_make(allocator)
+	run_token_list(c, tokens, &b)
+
+	// Trailing newlines are dropped, as in every shell: `cd $(pwd)` has to
+	// produce a path, not a path with a line break welded onto the end.
+	text := strings.to_string(b)
+	for len(text) > 0 && (text[len(text) - 1] == '\n' || text[len(text) - 1] == '\r') {
+		text = text[:len(text) - 1]
+	}
+	return text, .None
+}
+
+// The body of shell_run, shared with shell_capture. `sink` is nil when output
+// belongs on the terminal.
+@(private = "file")
+run_token_list :: proc(c: ^Client, tokens: []Token, sink: ^strings.Builder) {
 	if len(tokens) == 0 {
 		return
 	}
@@ -491,7 +654,7 @@ shell_run :: proc(c: ^Client, line: string) {
 				(join == .On_Failure && c.last_status != 0)
 
 			if should_run {
-				run_pipeline(c, segment)
+				run_pipeline(c, segment, sink)
 			}
 
 			executed += 1
@@ -512,7 +675,7 @@ shell_run :: proc(c: ^Client, line: string) {
 			join = .On_Failure
 		case .Semi:
 			join = .Always
-		case .Word, .Pipe, .Write, .Append:
+		case .Word, .Pipe, .Write, .Append, .Read:
 			unreachable()
 		}
 		start = i + 1
@@ -522,12 +685,13 @@ shell_run :: proc(c: ^Client, line: string) {
 // Executes one pipeline: a series of stages separated by '|', with an optional
 // redirection on the end.
 @(private = "file")
-run_pipeline :: proc(c: ^Client, tokens: []Token) {
+run_pipeline :: proc(c: ^Client, tokens: []Token, sink: ^strings.Builder) {
 	stages := make([dynamic]Stage, context.temp_allocator)
 	current := make([dynamic]string, context.temp_allocator)
 
 	redirect := ""
 	redirect_append := false
+	read_from := ""
 
 	i := 0
 	for i < len(tokens) {
@@ -541,7 +705,17 @@ run_pipeline :: proc(c: ^Client, tokens: []Token) {
 				c.last_status = 2
 				return
 			}
-			append(&current, word)
+
+			// Globbing comes after expansion, so `ls $DIR/*` works, and only
+			// for words that actually look like patterns. A quoted pattern is
+			// a filename and is left exactly as written.
+			if matches := tokens[i].literal_glob ? nil : glob_word(c, word); matches != nil {
+				for m in matches {
+					append(&current, m)
+				}
+			} else {
+				append(&current, word)
+			}
 			i += 1
 
 		case .Pipe:
@@ -570,6 +744,21 @@ run_pipeline :: proc(c: ^Client, tokens: []Token) {
 			redirect_append = tokens[i].kind == .Append
 			i += 2
 
+		case .Read:
+			if i + 1 >= len(tokens) || tokens[i + 1].kind != .Word {
+				client_send(c, "\x1b[31msyntax error: expected a file name after '<'\x1b[0m\r\n")
+				c.last_status = 2
+				return
+			}
+			source, xerr := shell_expand(c, tokens[i + 1].text)
+			if xerr != .None {
+				client_sendf(c, "\x1b[31m%s\x1b[0m\r\n", lex_error_string(xerr))
+				c.last_status = 2
+				return
+			}
+			read_from = source
+			i += 2
+
 		case .Semi, .And, .Or:
 			unreachable() // consumed by shell_run
 		}
@@ -594,12 +783,23 @@ run_pipeline :: proc(c: ^Client, tokens: []Token) {
 		return
 	}
 
+	// `< file` seeds the first stage's input, exactly as if the file had been
+	// cat'd into it.
 	piped_input := ""
+	if len(read_from) > 0 {
+		content, ok := read_redirect(c, read_from)
+		if !ok {
+			c.last_status = 1
+			return
+		}
+		piped_input = content
+	}
+
 	status := 0
 
 	for stage, index in stages {
 		is_last := index == len(stages) - 1
-		capture_output := !is_last || len(redirect) > 0
+		capture_output := !is_last || len(redirect) > 0 || sink != nil
 
 		ctx := Cmd_Ctx {
 			client = c,
@@ -630,6 +830,14 @@ run_pipeline :: proc(c: ^Client, tokens: []Token) {
 	}
 
 	c.last_status = status
+
+	// Inside a substitution the output is the value, not something to print.
+	// A redirection still wins over it: `$(echo hi > f)` writes the file and
+	// expands to nothing, which is what a shell does.
+	if sink != nil && len(redirect) == 0 {
+		strings.write_string(sink, piped_input)
+		return
+	}
 
 	if len(redirect) > 0 && status == 0 {
 		write_redirect(c, redirect, piped_input, redirect_append)
@@ -714,6 +922,68 @@ try_assignment :: proc(c: ^Client, args: []string) -> bool {
 
 	c.last_status = 0
 	return true
+}
+
+// Expands one word as a glob, or returns nil when it is not a pattern or
+// matches nothing.
+//
+// A pattern that matches nothing is left alone rather than erased, which is
+// what a shell does by default and the only safe choice: `rm *.bak` in a
+// directory with no backups must fail with "no such file", not expand to
+// nothing and become a bare `rm`.
+//
+// Matches inside the working directory come back relative, so `ls *.txt`
+// prints `notes.txt` rather than `/home/alice/notes.txt`.
+@(private = "file")
+glob_word :: proc(c: ^Client, word: string) -> []string {
+	if !has_glob_magic(word) {
+		return nil
+	}
+
+	cwd := client_get_cwd(c, context.temp_allocator)
+	user := client_get_user(c, context.temp_allocator)
+	pattern := vfs_resolve_path(cwd, word, context.temp_allocator)
+
+	matches := vfs_glob(&g_vfs, pattern, user, context.temp_allocator)
+	if len(matches) == 0 {
+		return nil
+	}
+
+	// Only strip the prefix when the word was itself relative; an absolute
+	// pattern should keep producing absolute paths.
+	if strings.has_prefix(word, "/") {
+		return matches
+	}
+
+	prefix := cwd == "/" ? "/" : strings.concatenate({cwd, "/"}, context.temp_allocator)
+	out := make([dynamic]string, context.temp_allocator)
+	for m in matches {
+		append(&out, strings.has_prefix(m, prefix) ? m[len(prefix):] : m)
+	}
+	return out[:]
+}
+
+// Reads the file behind `< target`.
+@(private = "file")
+read_redirect :: proc(c: ^Client, target: string) -> (content: string, ok: bool) {
+	cwd := client_get_cwd(c, context.temp_allocator)
+	user := client_get_user(c, context.temp_allocator)
+	abs := vfs_resolve_path(cwd, target, context.temp_allocator)
+
+	data, read_ok := vfs_read(&g_vfs, abs, user, context.temp_allocator)
+	if !read_ok {
+		// Same distinction the file-reading commands make, so `< somedir` and
+		// `cat somedir` do not explain themselves differently.
+		reason := vfs_is_dir(&g_vfs, abs) ? VFS_Error.Is_A_Directory : VFS_Error.Not_Found
+		client_sendf(
+			c,
+			"\x1b[31m%s: %s\x1b[0m\r\n",
+			sanitize_text(target, 64, context.temp_allocator),
+			vfs_error_string(reason),
+		)
+		return "", false
+	}
+	return data, true
 }
 
 @(private = "file")

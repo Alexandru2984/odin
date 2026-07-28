@@ -308,6 +308,136 @@ test_cowsay_and_banner_read_a_pipe :: proc(t: ^testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Globbing
+//
+// The matcher is pure, so the fiddly parts get tested here rather than through
+// a live filesystem.
+// ---------------------------------------------------------------------------
+
+@(test)
+test_glob_star_and_question :: proc(t: ^testing.T) {
+	testing.expect(t, glob_match_segment("*", "anything"), "bare star matches")
+	testing.expect(t, glob_match_segment("*", ""), "star matches empty")
+	testing.expect(t, glob_match_segment("*.txt", "notes.txt"), "suffix pattern")
+	testing.expect(t, !glob_match_segment("*.txt", "notes.md"), "wrong suffix")
+	testing.expect(t, glob_match_segment("a*c", "abc"), "star in the middle")
+	testing.expect(t, glob_match_segment("a*c", "ac"), "star may match nothing")
+	testing.expect(t, glob_match_segment("*b*", "abc"), "two stars")
+
+	testing.expect(t, glob_match_segment("?", "a"), "question matches one")
+	testing.expect(t, !glob_match_segment("?", ""), "question needs one")
+	testing.expect(t, !glob_match_segment("?", "ab"), "question is exactly one")
+	testing.expect(t, glob_match_segment("a?c.txt", "abc.txt"), "question in context")
+
+	// The pathological case the iterative matcher exists for. A recursive
+	// implementation takes exponential time on this; this must simply answer.
+	testing.expect(
+		t,
+		!glob_match_segment("a*a*a*a*a*a*a*b", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+		"no catastrophic backtracking",
+	)
+}
+
+@(test)
+test_glob_character_classes :: proc(t: ^testing.T) {
+	testing.expect(t, glob_match_segment("[abc]", "b"), "class member")
+	testing.expect(t, !glob_match_segment("[abc]", "d"), "non-member")
+	testing.expect(t, glob_match_segment("[a-z]", "q"), "range")
+	testing.expect(t, !glob_match_segment("[a-z]", "Q"), "range is case sensitive")
+	testing.expect(t, glob_match_segment("[!a]", "b"), "negated class")
+	testing.expect(t, !glob_match_segment("[!a]", "a"), "negated class excludes")
+	testing.expect(t, glob_match_segment("file[0-9].txt", "file7.txt"), "class in context")
+	testing.expect(t, !glob_match_segment("file[0-9].txt", "filex.txt"), "class rejects")
+
+	// An unterminated class is a literal '[', as in a real shell.
+	testing.expect(t, glob_match_segment("[abc", "[abc"), "unterminated class is literal")
+}
+
+@(test)
+test_glob_leaves_dotfiles_alone :: proc(t: ^testing.T) {
+	// The rule that stops `rm *` taking the dotfiles with it.
+	testing.expect(t, !glob_match_segment("*", ".config"), "star skips a leading dot")
+	testing.expect(t, !glob_match_segment("?config", ".config"), "question skips it too")
+	testing.expect(t, !glob_match_segment("[.]config", ".config"), "a class does not count")
+
+	// Asked for by name, it matches.
+	testing.expect(t, glob_match_segment(".*", ".config"), "an explicit dot matches")
+	testing.expect(t, glob_match_segment(".config", ".config"), "exact name matches")
+
+	// A dot anywhere else is an ordinary character.
+	testing.expect(t, glob_match_segment("*.txt", "notes.txt"), "inner dot is ordinary")
+}
+
+@(test)
+test_glob_paths_match_segment_by_segment :: proc(t: ^testing.T) {
+	testing.expect(t, glob_match_path("/tmp/*.txt", "/tmp/a.txt"), "one level")
+	testing.expect(t, !glob_match_path("/tmp/*.txt", "/tmp/sub/a.txt"), "star does not cross /")
+	testing.expect(t, glob_match_path("/home/*/mail", "/home/alice/mail"), "middle segment")
+	testing.expect(t, !glob_match_path("/home/*/mail", "/home/alice/mail/1"), "depth must agree")
+	testing.expect(t, !glob_match_path("/home/*", "/home"), "pattern is longer")
+}
+
+@(test)
+test_glob_magic_detection :: proc(t: ^testing.T) {
+	// Words without magic take the fast path and must never be treated as
+	// patterns — every command name goes through this.
+	testing.expect(t, !has_glob_magic("ls"), "plain word")
+	testing.expect(t, !has_glob_magic("/home/alice/notes.txt"), "plain path")
+	testing.expect(t, has_glob_magic("*.txt"), "star")
+	testing.expect(t, has_glob_magic("a?b"), "question")
+	testing.expect(t, has_glob_magic("[ab]"), "class")
+}
+
+// ---------------------------------------------------------------------------
+// Command substitution
+// ---------------------------------------------------------------------------
+
+@(test)
+test_lexer_keeps_substitutions_whole :: proc(t: ^testing.T) {
+	// The inner text is a command line of its own. If the lexer tokenised it,
+	// the pipe below would split the outer line into two stages.
+	words := lex_words(`echo $(cat f | wc -l)`)
+	testing.expect_value(t, len(words), 2)
+	testing.expect_value(t, words[1], "$(cat f | wc -l)")
+
+	// Nesting, and parentheses inside quotes, both have to be tracked.
+	nested := lex_words(`echo $(echo $(date))`)
+	testing.expect_value(t, len(nested), 2)
+	testing.expect_value(t, nested[1], "$(echo $(date))")
+
+	quoted := lex_words(`echo $(echo "a)b")`)
+	testing.expect_value(t, len(quoted), 2)
+	testing.expect_value(t, quoted[1], `$(echo "a)b")`)
+
+	// An unclosed substitution is a syntax error, not a silently truncated line.
+	_, err := shell_lex(`echo $(cat f`, context.temp_allocator)
+	testing.expect(t, err == .Unterminated_Substitution, "unterminated $( reported")
+
+	// A lone dollar followed by something else is still ordinary text.
+	plain := lex_words(`echo $ (x)`)
+	testing.expect(t, len(plain) >= 2, "bare dollar survives")
+}
+
+@(test)
+test_lexer_finds_input_redirection :: proc(t: ^testing.T) {
+	tokens, err := shell_lex("wc -l < file.txt", context.temp_allocator)
+	testing.expect(t, err == .None, "input redirection lexes")
+
+	kinds: [Token_Kind]int
+	for tok in tokens {
+		kinds[tok.kind] += 1
+	}
+	testing.expect_value(t, kinds[.Read], 1)
+	testing.expect_value(t, kinds[.Word], 3)
+
+	// Quoted, it is text rather than syntax.
+	quoted, _ := shell_lex(`echo "a < b"`, context.temp_allocator)
+	for tok in quoted {
+		testing.expect(t, tok.kind != .Read, "'<' inside quotes is not an operator")
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Client control messages
 // ---------------------------------------------------------------------------
 

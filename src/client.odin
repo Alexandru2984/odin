@@ -83,6 +83,9 @@ Client :: struct {
 	vars:        map[string]string, // owned keys and values
 	aliases:     map[string]string, // owned keys and values
 	last_status: int,
+	// How many `$( )` levels are currently on the stack. Same thread, same
+	// reasoning: only the command runner touches it.
+	subst_depth: int,
 
 	// The full-screen editor, when one is open. Reader-thread private: only
 	// the thread running commands ever touches it.
