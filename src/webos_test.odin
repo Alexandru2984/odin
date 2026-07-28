@@ -489,6 +489,28 @@ test_human_size :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_signed_int_parsing :: proc(t: ^testing.T) {
+	// `test -1 -lt 0` has to work, and parse_positive_int refuses the sign.
+	v, ok := parse_int_signed("-1")
+	testing.expect(t, ok, "negative accepted")
+	testing.expect_value(t, v, -1)
+
+	v, ok = parse_int_signed("  42 ")
+	testing.expect(t, ok, "surrounding space ignored")
+	testing.expect_value(t, v, 42)
+
+	for bad in ([?]string{"", "-", "+", "12a", "a12", "1 2", "--1"}) {
+		_, bad_ok := parse_int_signed(bad)
+		testing.expect(t, !bad_ok, "malformed number rejected")
+	}
+
+	// Overflow is refused rather than wrapped into a value that would compare
+	// as something absurd.
+	_, over := parse_int_signed("99999999999999999999999")
+	testing.expect(t, !over, "overflow rejected")
+}
+
+@(test)
 test_truncate_counts_runes :: proc(t: ^testing.T) {
 	testing.expect_value(t, truncate_runes("short", 10, context.temp_allocator), "short")
 	testing.expect_value(t, truncate_runes("abcdefgh", 4, context.temp_allocator), "abc…")

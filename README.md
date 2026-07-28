@@ -82,6 +82,7 @@ Not a command dispatcher. A small but real shell language, in `src/shell.odin`:
 - **variables** — `export NAME=value`, `$NAME`, `${NAME}`, `$?`, `$USER`, `$PWD`
 - **aliases** — `alias ll='ls -l'`, `unalias ll`
 - **background jobs** — `sleep 30 &`, then `jobs`, `kill`, `wait`
+- **scripts** — `sh build.sh arg`, with `if`, `while`, `for` and `$1`..`$9`
 
 Expansion happens at execution time, not at lex time. That is a deliberate
 design decision rather than an implementation detail: expanding during the lex
@@ -132,7 +133,51 @@ mid-write. Disconnecting cancels everything the session started — but the
 client is reference-counted, so a job that has not noticed yet cannot write
 into freed memory.
 
-### 80 commands
+### Scripts
+
+`sh <file>` runs a file out of the filesystem. Write one with `edit`, make it
+say something, run it.
+
+```sh
+# count.sh — usage: sh count.sh 5
+export N=0
+while [ $N -lt $1 ]
+do
+  echo counting $N
+  export N=$(calc $N + 1)
+done
+
+for f in *.txt
+do
+  if [ -s $f ]
+  then
+    echo "$f has something in it"
+  fi
+done
+```
+
+`if`/`else`/`fi`, `while`/`do`/`done`, `for x in ...`/`do`/`done`, `exit`, and
+`test` in both spellings — `test -f x` and `[ -f x ]` are the same command, which
+is why the closing bracket is an argument rather than syntax. Arguments arrive
+as `$0`..`$9`, with `$#` and `$@`. A `#!` line is a comment, so a script can
+carry one harmlessly.
+
+Scripts run in the current shell rather than a child, so a script's `cd` moves
+the session — closer to `source` than to running a program. A child would need
+its own session state and the only thing it would buy is isolating that `cd`.
+
+Control flow is interpreted over a pre-matched line table rather than parsed
+into a tree: blocks are line-oriented, and a jump table is both simpler and
+easier to *bound*. Bounding is the point. On a shared server `while true` is
+one line away, so a run is capped at 10,000 commands, nesting at 16 levels,
+`sh` calling `sh` at 4 deep, and a script is checked for cancellation between
+every line — which means a runaway one can be backgrounded and killed like
+anything else.
+
+Blocks that do not balance are refused before anything runs. Executing half a
+script whose author forgot a `fi` is worse than executing none of it.
+
+### 86 commands
 
 Filesystem
 : `ls` `cd` `pwd` `mkdir` `rmdir` `rm` `touch` `cp` `mv` `stat` `chmod` `tree` `find` `du` `df`
@@ -147,7 +192,7 @@ Social
 : `who` `wall` `msg` `mail` `me` `bell`
 
 System
-: `help` `man` `uname` `uptime` `date` `cal` `free` `dmesg` `version` `motd` `neofetch` `clear` `theme` `history` `alias` `unalias` `export` `unset` `env` `ps` `jobs` `kill` `wait` `sleep`
+: `help` `man` `uname` `uptime` `date` `cal` `free` `dmesg` `version` `motd` `neofetch` `clear` `theme` `history` `alias` `unalias` `export` `unset` `env` `ps` `jobs` `kill` `wait` `sleep` `sh` `test` `[` `true` `false` `exit`
 
 Fun
 : `fortune` `cowsay` `matrix` `banner` `roll` `8ball` `calc` `clearall`
@@ -279,7 +324,9 @@ src/
   text.odin            sanitisation and formatting helpers
   glob.odin            pattern matching and the glob scan
   process.odin         the process table and background jobs
+  script.odin          the script interpreter
   commands_proc.odin   ps, jobs, kill, wait, sleep
+  commands_test.odin   test, [, true, false
 public/                the entire frontend
 tests/                 integration suites and their runner
 deploy/                systemd unit, nginx vhost, security headers
@@ -315,7 +362,7 @@ run against the same state would collide with the first.
 - [x] Accounts: Argon2id, sessions, masked credential entry
 - [x] A real shell: pipes, `&&`/`||`/`;`, redirection both ways, quoting,
       variables, aliases, globbing, command substitution
-- [x] 80 commands with generated help and man pages
+- [x] 86 commands with generated help and man pages
 - [x] Full-screen editor
 - [x] Mail between accounts
 - [x] Responsive frontend, PWA, mobile layout, server-side narrow-terminal support
@@ -324,7 +371,7 @@ run against the same state would collide with the first.
 - [x] Unit tests gating deployment
 - [x] Integration suites in the repo, gating deployment
 - [x] A process model: background jobs, `jobs`/`kill`/`wait`, a real `ps`
-- [ ] Scripts stored in the VFS and run from the shell, with arguments
+- [x] Scripts stored in the VFS, with arguments and control flow
 - [ ] Interrupting a *foreground* command with `^C`, which needs command
       execution moved off the reader thread
 - [ ] Per-user persistent settings beyond the VFS

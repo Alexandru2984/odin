@@ -42,6 +42,15 @@ Cmd_Ctx :: struct {
 	// The process this command belongs to, when there is one. Long-running
 	// loops poll it so `kill` and a disconnect can stop them.
 	proc_id: int,
+
+	// True when this is running on a background thread, against a snapshot
+	// rather than the live session. `sh` needs it to decide whether a script's
+	// `cd` should be visible to the lines after it.
+	detached: bool,
+
+	// Set while a script is running, so `exit` can unwind it instead of
+	// logging the session out. nil otherwise.
+	script_stop: ^bool,
 }
 
 // Writes command output. Newlines are normalised to CRLF for the terminal but

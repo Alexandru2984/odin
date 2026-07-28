@@ -418,6 +418,30 @@ expand_one :: proc(
 		return 2, .None
 	}
 
+	// $1 .. $9, $0, $# and $@ come from the running script.
+	if text[1] >= '0' && text[1] <= '9' {
+		index := int(text[1] - '0')
+		if index < len(ex.args) {
+			strings.write_string(b, ex.args[index])
+		}
+		return 2, .None
+	}
+	if text[1] == '#' {
+		// $0 is the script's own name and is not one of the arguments.
+		count := len(ex.args) > 0 ? len(ex.args) - 1 : 0
+		fmt.sbprintf(b, "%d", count)
+		return 2, .None
+	}
+	if text[1] == '@' || text[1] == '*' {
+		if len(ex.args) > 1 {
+			strings.write_string(
+				b,
+				strings.join(ex.args[1:], " ", context.temp_allocator),
+			)
+		}
+		return 2, .None
+	}
+
 	// $(command) runs the command and substitutes its output.
 	if text[1] == '(' {
 		end, ok := find_subst_end(text, 1)
@@ -716,6 +740,43 @@ Exec :: struct {
 	detached: ^Detached,        // nil: use the live session
 	pid:      int,              // owning process, 0 when untracked
 	status:   ^int,             // never &c.last_status from another thread
+
+	// A running script's positional parameters, $0 first. Empty elsewhere,
+	// which is what makes `$1` expand to nothing at an interactive prompt
+	// rather than to whatever the last script was passed.
+	args:     []string,
+	// Set by `exit` to unwind the script. nil when no script is running.
+	stop:     ^bool,
+}
+
+// Where the shell's own cwd and user come from, honouring a detached snapshot.
+exec_cwd :: proc(c: ^Client, ex: Exec) -> string {
+	if ex.detached != nil {
+		return ex.detached.cwd
+	}
+	return client_get_cwd(c, context.temp_allocator)
+}
+
+exec_user :: proc(c: ^Client, ex: Exec) -> string {
+	if ex.detached != nil {
+		return ex.detached.user
+	}
+	return client_get_user(c, context.temp_allocator)
+}
+
+// Lexes and runs one line under an existing execution context.
+//
+// This is what a script line goes through. It is deliberately not shell_run:
+// that one owns process registration and the `&` handling, both of which
+// belong to a whole interactive line rather than to each line of a file.
+shell_run_line :: proc(c: ^Client, line: string, ex: Exec) {
+	tokens, lex_err := shell_lex(line)
+	if lex_err != .None {
+		client_sendf(c, "\x1b[31msyntax error: %s\x1b[0m\r\n", lex_error_string(lex_err))
+		ex.status^ = 2
+		return
+	}
+	run_token_list(c, tokens, ex)
 }
 
 @(private = "file")
@@ -800,7 +861,9 @@ run_pipeline :: proc(c: ^Client, tokens: []Token, ex: Exec) {
 			// Globbing comes after expansion, so `ls $DIR/*` works, and only
 			// for words that actually look like patterns. A quoted pattern is
 			// a filename and is left exactly as written.
-			if matches := tokens[i].literal_glob ? nil : glob_word(c, word); matches != nil {
+			if matches := tokens[i].literal_glob \
+			? nil \
+			: shell_glob_word(c, word, ex); matches != nil {
 				for m in matches {
 					append(&current, m)
 				}
@@ -907,6 +970,8 @@ run_pipeline :: proc(c: ^Client, tokens: []Token, ex: Exec) {
 			? ex.detached.user \
 			: client_get_user(c, context.temp_allocator),
 			proc_id = ex.pid,
+			detached = ex.detached != nil,
+			script_stop = ex.stop,
 		}
 
 		builder: strings.Builder
@@ -1054,14 +1119,13 @@ try_assignment :: proc(c: ^Client, args: []string) -> bool {
 //
 // Matches inside the working directory come back relative, so `ls *.txt`
 // prints `notes.txt` rather than `/home/alice/notes.txt`.
-@(private = "file")
-glob_word :: proc(c: ^Client, word: string) -> []string {
+shell_glob_word :: proc(c: ^Client, word: string, ex: Exec) -> []string {
 	if !has_glob_magic(word) {
 		return nil
 	}
 
-	cwd := client_get_cwd(c, context.temp_allocator)
-	user := client_get_user(c, context.temp_allocator)
+	cwd := exec_cwd(c, ex)
+	user := exec_user(c, ex)
 	pattern := vfs_resolve_path(cwd, word, context.temp_allocator)
 
 	matches := vfs_glob(&g_vfs, pattern, user, context.temp_allocator)

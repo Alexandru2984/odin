@@ -87,6 +87,8 @@ Client :: struct {
 	// How many `$( )` levels are currently on the stack. Same thread, same
 	// reasoning: only the command runner touches it.
 	subst_depth: int,
+	// How many `sh` invocations are nested, for the same reason.
+	script_depth: int,
 
 	// How many things still hold this pointer: the connection itself, plus one
 	// for every background job it started. The last one to let go frees it.
