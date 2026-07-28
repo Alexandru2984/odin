@@ -204,7 +204,55 @@ handle_connection :: proc(socket: net.TCP_Socket, peer: net.Endpoint) {
 		return
 	}
 
+	if route == "/metrics" {
+		handle_metrics_request(socket, peer, &req, head_only)
+		return
+	}
+
 	http_serve_static(socket, req.target, head_only)
+}
+
+// Serves the Prometheus exposition, but only to a scraper talking to the
+// backend directly.
+//
+// The discriminator is the absence of proxy headers rather than the peer
+// address, because nginx also connects from loopback: every public request
+// arrives from 127.0.0.1 carrying X-Forwarded-For, and a direct scrape from a
+// Prometheus on the same host does not. That makes the rule self-enforcing —
+// if the nginx `deny` were ever removed, the endpoint would still refuse
+// anything that came through it.
+//
+// Operational counts are not secret in the way a password is, but they are
+// free reconnaissance: session counts tell an attacker whether their flood is
+// working, and quota gauges tell them how close the filesystem is to full.
+handle_metrics_request :: proc(
+	socket: net.TCP_Socket,
+	peer: net.Endpoint,
+	req: ^HTTP_Request,
+	head_only: bool,
+) {
+	proxied :=
+		len(http_header(req, "x-forwarded-for")) > 0 ||
+		len(http_header(req, "x-real-ip")) > 0 ||
+		len(http_header(req, "cf-connecting-ip")) > 0
+
+	if proxied || !is_loopback_address(peer.address) {
+		// Not log_reject: that counts a refused *connection*, and this is a
+		// refused scrape of an endpoint that should not have been reachable.
+		log_info("metrics_denied", "request arrived through a proxy")
+		http_send_status(socket, 404, "Not Found", head_only = head_only)
+		return
+	}
+
+	body := metrics_render(context.temp_allocator)
+	http_send_response(
+		socket,
+		200,
+		"OK",
+		"text/plain; version=0.0.4; charset=utf-8",
+		transmute([]byte)body,
+		head_only = head_only,
+	)
 }
 
 // Determines the real client address.
@@ -325,6 +373,8 @@ run_terminal_session :: proc(socket: net.TCP_Socket, ip: string) {
 	// wakes up to send keepalive pings and check the idle deadline.
 	net.set_option(socket, .Receive_Timeout, WS_POLL_TIMEOUT)
 	net.set_option(socket, .Send_Timeout, WRITE_TIMEOUT)
+
+	metric_inc(&g_metrics.connections_total)
 
 	client := new(Client)
 	client_init(client, socket, next_client_id(), ip)

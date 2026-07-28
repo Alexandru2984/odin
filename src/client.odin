@@ -253,6 +253,7 @@ client_enqueue :: proc(c: ^Client, framed: []byte) -> bool {
 	}
 
 	if len(c.out) + len(framed) > MAX_OUT_PENDING {
+		metric_inc(&g_metrics.output_dropped)
 		c.out_overflow = true
 		sync.cond_signal(&c.out_cond)
 		return false
@@ -324,6 +325,7 @@ client_feed_input :: proc(c: ^Client, data: string) {
 	if intrinsics.atomic_load(&c.current_pid) != 0 && strings.contains_rune(data, KEY_CTRL_C) {
 		pid := intrinsics.atomic_load(&c.current_pid)
 		if pid != 0 {
+			metric_inc(&g_metrics.interrupts)
 			proc_kill(pid, c.id)
 			// Echoed the way a terminal does, so the interrupt is visible even
 			// when the command it stopped prints nothing.

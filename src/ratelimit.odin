@@ -43,6 +43,11 @@ rate_allow_n :: proc(b: ^Rate_Bucket, n: f64) -> bool {
 		b.tokens -= n
 		return true
 	}
+
+	// Counted here rather than at each call site: every bucket in the program
+	// funnels through this one refusal, so there is exactly one place to keep
+	// correct.
+	metric_inc(&g_metrics.rate_limited)
 	return false
 }
 

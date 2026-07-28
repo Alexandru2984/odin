@@ -56,6 +56,34 @@ instance can run beside the live one.
 | `WEBOS_DATA_DIR` | `data` | Where `vfs.db` and `users.db` live |
 | `WEBOS_ALLOWED_ORIGINS` | `https://odin.micutu.com` | Comma-separated `Origin` allowlist for the WebSocket upgrade |
 
+### Metrics
+
+`/metrics` serves a Prometheus exposition — sessions, commands, background
+jobs, interrupts, auth outcomes, rate-limit refusals, filesystem quota, traffic.
+
+It is **not** reachable from the internet, and by two independent means. nginx
+denies the location, and the backend itself refuses any request carrying
+`X-Forwarded-For`, `X-Real-IP` or `CF-Connecting-IP`. The second rule is the
+one that matters: nginx also connects from loopback, so the peer address
+cannot tell a scrape from a proxied request — but a scrape talking to the
+backend directly has no proxy headers. That makes the refusal self-enforcing
+if the nginx block is ever lost. It answers 404 rather than 403, because a
+refusal that admits something is there is an invitation to keep trying.
+
+Point a scraper at the backend directly:
+
+```yaml
+  - job_name: webos
+    static_configs:
+      - targets: ["127.0.0.1:47271"]
+```
+
+Nothing in the exposition identifies anyone. Counts and totals answer "is it
+healthy and how busy is it"; names, addresses and paths would answer "who is
+on it and what are they doing", which is not a monitoring question — and
+session counts are already enough to tell an attacker whether their flood is
+working, which is why the endpoint is closed in the first place.
+
 ### Deployment
 
 `deploy/` holds the real production configuration: the systemd unit, the nginx
@@ -332,6 +360,7 @@ src/
   control.odin         the binary control channel
   config.odin          every limit, in one place
   log.odin             structured logging and abuse aggregation
+  metrics.odin         the Prometheus exposition
   text.odin            sanitisation and formatting helpers
   glob.odin            pattern matching and the glob scan
   process.odin         the process table and background jobs
@@ -385,5 +414,5 @@ run against the same state would collide with the first.
 - [x] Scripts stored in the VFS, with arguments and control flow
 - [x] Interrupting a foreground command with `^C`
 - [ ] Per-user persistent settings beyond the VFS
-- [ ] `/metrics` for the Prometheus instance already running on the host
+- [x] `/metrics` for Prometheus, closed to the internet
 - [ ] A minimal desktop: more than one window over the same session

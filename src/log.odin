@@ -61,6 +61,11 @@ log_value :: proc(s: string) -> string {
 
 // An authentication or account event. `subject` is a username, never a secret.
 log_security :: proc(event: string, c: ^Client, subject: string, success: bool) {
+	metric_inc(&g_metrics.auth_attempts)
+	if !success {
+		metric_inc(&g_metrics.auth_failures)
+	}
+
 	outcome := success ? "ok" : "denied"
 	log_line(
 		"AUTH",
@@ -78,6 +83,8 @@ log_security :: proc(event: string, c: ^Client, subject: string, success: bool) 
 // A request refused before it became a session: a bad origin, an oversized
 // head, too many connections from one address.
 log_reject :: proc(reason: string, ip: string, detail: string = "") {
+	metric_inc(&g_metrics.connections_refused)
+
 	if len(detail) > 0 {
 		log_line("REJECT", reason, fmt.tprintf("ip=%q detail=%q", log_value(ip), log_value(detail)))
 		return

@@ -436,6 +436,8 @@ cmd_sh :: proc(ctx: ^Cmd_Ctx, args: []string) {
 		ex.detached = &detached
 	}
 
+	metric_inc(&g_metrics.scripts_run)
+
 	c.script_depth += 1
 	run_err := script_execute(c, ctx, lines, ex)
 	c.script_depth -= 1

@@ -677,6 +677,10 @@ shell_run :: proc(c: ^Client, line: string) {
 	run_token_list(c, tokens, Exec{pid = pid, status = &c.last_status})
 	intrinsics.atomic_store(&c.current_pid, 0)
 
+	metric_inc(&g_metrics.commands_total)
+	if c.last_status != 0 {
+		metric_inc(&g_metrics.commands_failed)
+	}
 	proc_end(pid, c.last_status)
 }
 

@@ -235,6 +235,21 @@ proc_snapshot :: proc(session: int, only_own: bool, allocator := context.temp_al
 	return out[:]
 }
 
+// How many processes are running, and how many entries the table holds. Two
+// numbers from one pass, because taking the lock twice for a metrics scrape
+// would report a pair that never existed together.
+proc_counts :: proc() -> (running: int, total: int) {
+	sync.mutex_lock(&g_procs_lock)
+	defer sync.mutex_unlock(&g_procs_lock)
+
+	for p in g_procs {
+		if p.state == .Running {
+			running += 1
+		}
+	}
+	return running, len(g_procs)
+}
+
 // True while the given process is still running.
 proc_is_running :: proc(pid: int) -> bool {
 	sync.mutex_lock(&g_procs_lock)
@@ -323,6 +338,8 @@ proc_spawn :: proc(c: ^Client, line: string) -> (pid: int, err: string) {
 	job.line = strings.clone(line)
 	job.cwd = client_get_cwd(c, context.allocator)
 	job.user = client_get_user(c, context.allocator)
+
+	metric_inc(&g_metrics.jobs_started)
 
 	// self_cleanup, like the connection threads: nothing joins a background job,
 	// so the Thread has to release itself when its procedure returns.

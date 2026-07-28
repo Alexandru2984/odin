@@ -177,6 +177,9 @@ ws_fill :: proc(c: ^WS_Conn) -> WS_Error {
 
 	tmp: [8192]byte
 	n, rerr := net.recv_tcp(c.socket, tmp[:])
+	if n > 0 {
+		metric_add(&g_metrics.bytes_received, n)
+	}
 	if rerr != nil {
 		#partial switch rerr {
 		case .Timeout, .Would_Block, .Interrupted:
@@ -408,6 +411,9 @@ send_all :: proc(socket: net.TCP_Socket, data: []byte) -> bool {
 
 	for sent < len(data) {
 		n, err := net.send_tcp(socket, data[sent:])
+		if n > 0 {
+			metric_add(&g_metrics.bytes_sent, n)
+		}
 		sent += n
 
 		if err != nil {
