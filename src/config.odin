@@ -72,6 +72,13 @@ MAX_OUT_PENDING  :: 512 * 1024 // per-client queued output before we drop them
 // growing ours without limit.
 MAX_INPUT_PENDING :: 64 * 1024
 
+// Kernel send buffer per connection, pinned rather than left to autotune. See
+// the comment at the set_option call in main.odin: without this, MAX_OUT_PENDING
+// is not the limit it looks like. Generous for a terminal — a full 80x24 screen
+// of text is under 2 KB — while keeping the worst case across MAX_CLIENTS in
+// the tens of megabytes rather than the hundreds.
+SEND_BUFFER_SIZE :: 128 * 1024
+
 // ---------------------------------------------------------------------------
 // Timeouts
 // ---------------------------------------------------------------------------

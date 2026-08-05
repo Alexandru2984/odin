@@ -126,6 +126,13 @@ abuse_init :: proc() {
 // elapsed. `reason` must be one of a fixed set of literals, so the map cannot
 // be grown without bound by a remote peer.
 log_abuse :: proc(reason: string, ip: string) {
+	// Counted here as well as in log_reject. The log line is deliberately
+	// rate-limited, but the metric must not be: `server_full` and
+	// `per_ip_limit` are refusals that go through this path and no other, so
+	// leaving them out made connections_refused_total silently under-report
+	// exactly when the server is under pressure and someone is reading it.
+	metric_inc(&g_metrics.connections_refused)
+
 	should_report := false
 	total := 0
 

@@ -27,6 +27,19 @@ g_id_lock:      sync.Mutex
 g_handlers:      int
 g_handlers_lock: sync.Mutex
 
+// Reserved terminal session slots.
+//
+// Kept separately from len(g_clients) because a connection does not join that
+// list until after its handshake has completed and its threads exist. Admitting
+// on the length meant the check and the registration were two decisions with a
+// window between them: 48 simultaneous connections arriving into 8 free slots
+// each read the same stale length and all passed, putting 139 sessions on a
+// server capped at 128. Reserving the slot at the moment of the decision closes
+// it. g_clients remains the truth about *live* sessions and is what the metric
+// and `uptime` report; this is the truth about committed capacity.
+g_sessions:      int
+g_sessions_lock: sync.Mutex
+
 g_started_at: time.Time
 
 // ---------------------------------------------------------------------------
@@ -123,6 +136,25 @@ handler_release :: proc() {
 	sync.mutex_lock(&g_handlers_lock)
 	defer sync.mutex_unlock(&g_handlers_lock)
 	g_handlers -= 1
+}
+
+// Takes a terminal session slot, or returns false if the server is full. The
+// caller must release it if and only if this returned true.
+session_acquire :: proc() -> bool {
+	sync.mutex_lock(&g_sessions_lock)
+	defer sync.mutex_unlock(&g_sessions_lock)
+
+	if g_sessions >= MAX_CLIENTS {
+		return false
+	}
+	g_sessions += 1
+	return true
+}
+
+session_release :: proc() {
+	sync.mutex_lock(&g_sessions_lock)
+	defer sync.mutex_unlock(&g_sessions_lock)
+	g_sessions -= 1
 }
 
 next_client_id :: proc() -> int {
@@ -342,12 +374,14 @@ handle_ws_request :: proc(socket: net.TCP_Socket, peer: net.Endpoint, req: ^HTTP
 	ip := strings.clone(client_address(peer, req))
 	defer delete(ip)
 
-	// Terminal session slots are a scarcer resource than page loads.
-	if client_count() >= MAX_CLIENTS {
+	// Terminal session slots are a scarcer resource than page loads, and the
+	// slot is taken here rather than tested here — see g_sessions.
+	if !session_acquire() {
 		log_abuse("server_full", ip)
 		http_send_status(socket, 503, "Service Unavailable")
 		return
 	}
+	defer session_release()
 
 	// Per-IP concurrency, enforced here rather than trusting nginx alone.
 	if !conn_acquire(&g_conns, ip) {
@@ -373,6 +407,22 @@ run_terminal_session :: proc(socket: net.TCP_Socket, ip: string) {
 	// wakes up to send keepalive pings and check the idle deadline.
 	net.set_option(socket, .Receive_Timeout, WS_POLL_TIMEOUT)
 	net.set_option(socket, .Send_Timeout, WRITE_TIMEOUT)
+
+	// Pin the kernel send buffer, which otherwise autotunes to tcp_wmem's
+	// maximum — 4 MB on this machine.
+	//
+	// MAX_OUT_PENDING is meant to bound what one connection can make the server
+	// hold, but it only bounds *our* queue. A peer that stops reading fills the
+	// socket buffer behind it first, and until that is full our writes keep
+	// succeeding and the queue stays empty: measured, 687 KB went to a client
+	// with a 4 KB receive window without output_dropped_total moving once. At
+	// MAX_CLIENTS that is most of a gigabyte of unswappable kernel memory
+	// sitting underneath a limit that believes it is capping 64 MB.
+	//
+	// Pinning it makes the queue the real limit again. Terminal output is
+	// interactive and small, so the throughput this gives up is not throughput
+	// anybody was using. Not net.set_option — see sockopt_linux.odin.
+	set_send_buffer(socket, SEND_BUFFER_SIZE)
 
 	metric_inc(&g_metrics.connections_total)
 

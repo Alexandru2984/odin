@@ -401,6 +401,7 @@ src/
   script.odin          the script interpreter
   commands_proc.odin   ps, jobs, kill, wait, sleep
   commands_test.odin   test, [, true, false
+  sockopt_linux.odin   socket options core:net sets incorrectly
 public/
   app.js               sessions, theme, font, matrix, key bar, mode switching
   desktop.js           the window manager
@@ -476,6 +477,45 @@ sockets rather than working. A real hunt is an environment variable away:
 FUZZ_ROUNDS=5000 FUZZ_TIMEOUT=0.2 FUZZ_SEED=7 python3 tests/test_fuzz.py
 ```
 
+### Load
+
+Fuzzing asks whether the server survives traffic that is trying to break it.
+`tests/test_load.py` asks the other question, and it has a different answer:
+what happens when a lot of people who are all behaving correctly turn up at
+once. Nothing about thread exhaustion, lock contention, or output arriving at
+the wrong session is reachable by malformed input.
+
+It fills the server to `MAX_CLIENTS`, runs every session concurrently and
+checks each one gets its own output and nobody else's, writes to the shared
+filesystem from 64 sessions at once, churns 200 connect-and-leave sessions
+while watching `/proc` for a thread or descriptor that does not come back, and
+finishes by making a client stop reading to confirm the cost lands on it alone.
+Each connection carries its own `X-Real-IP`, which from loopback the server
+honours, so it stands in for many visitors rather than one machine — otherwise
+the per-IP limit stops it long before the interesting part.
+
+It found two things on the first run, both since fixed:
+
+- **The session cap was advisory.** Admission tested `client_count()`, but a
+  connection does not join that list until after its handshake and its threads
+  exist. 48 simultaneous connections arriving into 8 free slots all read the
+  same stale count and all passed: 139 sessions on a server capped at 128. The
+  slot is now reserved by the decision itself.
+- **`MAX_OUT_PENDING` was not the limit it looked like.** It bounds our own
+  queue, but a peer that stops reading fills the kernel send buffer first, and
+  that autotunes to `tcp_wmem`'s maximum — 4 MB here. 687 KB went to a client
+  with a 4 KB receive window without `output_dropped_total` moving once, and at
+  `MAX_CLIENTS` that is most of a gigabyte of kernel memory underneath a limit
+  that believes it is capping 64 MB. The send buffer is now pinned, which makes
+  the queue the real limit again.
+
+The second fix could not go through `core:net`: `net.set_option` with
+`.Send_Buffer_Size` reports success and sends the kernel a pointer-sized number
+instead of the value, because the buffer-size branch is a type-switch case
+listing two types, so its variable is never narrowed from `any`. Asking for
+128 KB moved `sk_sndbuf` to 8388608 — the opposite of the intent. See
+`src/sockopt_linux.odin`.
+
 `tests/browser/` holds Playwright checks for the desktop, on a desktop and a
 phone viewport. They are deliberately **not** part of `make deploy`: they need
 a browser the deployment host is not required to have. Run them by hand when
@@ -503,3 +543,4 @@ the front end changes — they are also how the layout screenshots get taken.
 - [ ] Per-user persistent settings beyond the VFS
 - [x] `/metrics` for Prometheus, closed to the internet
 - [x] A desktop: draggable windows, a taskbar, one shell per window
+- [x] Load tested to the connection cap, gating deployment

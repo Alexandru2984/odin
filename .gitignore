@@ -36,3 +36,7 @@ dist/
 
 # Screenshots the browser suite drops in the working directory.
 *.png
+
+# Python bytecode from the test helpers.
+__pycache__/
+*.pyc

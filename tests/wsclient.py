@@ -13,8 +13,22 @@ import time
 
 class WS:
     def __init__(self, host="127.0.0.1", port=47999, origin="https://odin.micutu.com",
-                 path="/ws", timeout=5.0, extra_headers=""):
-        self.sock = socket.create_connection((host, port), timeout=timeout)
+                 path="/ws", timeout=5.0, extra_headers="", rcvbuf=None):
+        if rcvbuf is None:
+            self.sock = socket.create_connection((host, port), timeout=timeout)
+        else:
+            # A deliberately thin peer. Loopback receive buffers autotune to
+            # tens of megabytes, so a client that simply stops reading still
+            # absorbs far more than the server's own output queue holds, and
+            # the queue limit never comes into play. Pinning SO_RCVBUF before
+            # connect fixes the window small enough that the server has to do
+            # the buffering, which is the thing under test. Must be set before
+            # connect: afterwards the handshake has already advertised a
+            # window.
+            self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, rcvbuf)
+            self.sock.settimeout(timeout)
+            self.sock.connect((host, port))
         self.sock.settimeout(timeout)
         key = base64.b64encode(os.urandom(16)).decode()
         req = (
